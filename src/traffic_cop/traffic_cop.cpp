@@ -28,18 +28,19 @@
 #include "type/type.h"
 #include "type/types.h"
 #include "threadpool/mono_queue_pool.h"
+#include "network/postgres_protocol_handler.h"
 
 namespace peloton {
 namespace tcop {
 
-TrafficCop::TrafficCop():is_queuing_(false) {
+TrafficCop::TrafficCop(): is_queuing_(false) {
   LOG_TRACE("Starting a new TrafficCop");
   optimizer_.reset(new optimizer::Optimizer);
 //  result_ = ResultType::QUEUING;
 }
 
 TrafficCop::TrafficCop(void(* task_callback)(void *), void *task_callback_arg):
-    task_callback_(task_callback), task_callback_arg_(task_callback_arg) {
+  task_callback_(task_callback), task_callback_arg_(task_callback_arg) {
   optimizer_.reset(new optimizer::Optimizer);
 }
 
@@ -135,16 +136,20 @@ ResultType TrafficCop::AbortQueryHelper() {
 }
 
 ResultType TrafficCop::ExecuteStatement(
-    const std::shared_ptr<Statement> &statement,
-    const std::vector<type::Value> &params, UNUSED_ATTRIBUTE const bool unnamed,
-    std::shared_ptr<stats::QueryMetric::QueryParams> param_stats,
-    const std::vector<int> &result_format, std::vector<StatementResult> &result,
-    int &rows_changed, UNUSED_ATTRIBUTE std::string &error_message,
-    const size_t thread_id UNUSED_ATTRIBUTE) {
+  const std::shared_ptr<Statement> &statement,
+  const std::vector<type::Value> &params, UNUSED_ATTRIBUTE const bool unnamed,
+  std::shared_ptr<stats::QueryMetric::QueryParams> param_stats,
+  const std::vector<int> &result_format, std::vector<StatementResult> &result,
+  int &rows_changed, UNUSED_ATTRIBUTE std::string &error_message,
+  const size_t thread_id UNUSED_ATTRIBUTE) {
+
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"begin execution, begin ExecuteStatement");
+  }
   if (settings::SettingsManager::GetInt(settings::SettingId::stats_mode) !=
       STATS_TYPE_INVALID) {
     stats::BackendStatsContext::GetInstance()->InitQueryMetric(statement,
-                                                               param_stats);
+        param_stats);
   }
   LOG_TRACE("Execute Statement of name: %s",
             statement->GetStatementName().c_str());
@@ -156,21 +161,25 @@ ResultType TrafficCop::ExecuteStatement(
   LOG_TRACE("----QueryType: %d--------", (int)statement->GetQueryType());
   try {
     switch (statement->GetQueryType()) {
-      case QueryType::QUERY_BEGIN:
-        LOG_TRACE("QUERY_BEGIN");
-        return BeginQueryHelper(thread_id);
-      case QueryType::QUERY_COMMIT:
-        return CommitQueryHelper();
-      case QueryType::QUERY_ROLLBACK:
-        return AbortQueryHelper();
-      default:
-        ExecuteStatementPlan(statement->GetPlanTree(), params, result,
-                             result_format, thread_id);
-        if (is_queuing_) {
-          return ResultType::QUEUING;
-        }
-        // if in ExecuteStatementPlan, these is no need to queue task, like 'BEGIN', directly return result
-        return ExecuteStatementGetResult(rows_changed);
+    case QueryType::QUERY_BEGIN:
+      LOG_TRACE("QUERY_BEGIN");
+      return BeginQueryHelper(thread_id);
+    case QueryType::QUERY_COMMIT:
+      return CommitQueryHelper();
+    case QueryType::QUERY_ROLLBACK:
+      return AbortQueryHelper();
+    default:
+      ExecuteStatementPlan(statement->GetPlanTree(), params, result,
+                           result_format, thread_id);
+      if (is_queuing_) {
+        return ResultType::QUEUING;
+      }
+      // if in ExecuteStatementPlan, these is no need to queue task, like 'BEGIN', directly return result
+      ResultType rs = ExecuteStatementGetResult(rows_changed);
+      if (peloton::network::aa_IsProfiling() == true) {
+        peloton::network::aa_InsertTimePoint((char *)"end execution, end ExecuteStatement");
+      }
+      return rs;
     }
   } catch (Exception &e) {
     error_message = e.what();
@@ -188,10 +197,10 @@ ResultType TrafficCop::ExecuteStatementGetResult(int &rows_changed) {
 }
 
 executor::ExecuteResult TrafficCop::ExecuteStatementPlan(
-    std::shared_ptr<planner::AbstractPlan> plan,
-    const std::vector<type::Value> &params,
-    std::vector<StatementResult> &result, const std::vector<int> &result_format,
-    const size_t thread_id) {
+  std::shared_ptr<planner::AbstractPlan> plan,
+  const std::vector<type::Value> &params,
+  std::vector<StatementResult> &result, const std::vector<int> &result_format,
+  const size_t thread_id) {
   concurrency::Transaction *txn;
 
   auto &curr_state = GetCurrentTxnState();
@@ -217,6 +226,9 @@ executor::ExecuteResult TrafficCop::ExecuteStatementPlan(
     PL_ASSERT(task_callback_);
     PL_ASSERT(task_callback_arg_);
     ExecutePlanArg* arg = new ExecutePlanArg(plan, txn, params, result, result_format, p_status_);
+    if (peloton::network::aa_IsProfiling() == true) {
+      peloton::network::aa_InsertTimePoint((char *)"begin scheduling");
+    }
     threadpool::MonoQueuePool::GetInstance().SubmitTask(ExecutePlanWrapper, arg, task_callback_, task_callback_arg_);
     LOG_TRACE("Submit Task into MonoQueuePool");
 
@@ -239,10 +251,17 @@ void TrafficCop::ExecutePlanWrapper(void *arg_ptr) {
   PL_ASSERT(arg->txn_);
 //  PL_ASSERT(&arg->result_);
   PL_ASSERT(&arg->params_);
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"end scheduling, begin real_execution");
+  }
   executor::PlanExecutor::ExecutePlan(arg->plan_, arg->txn_, arg->params_,
                                       arg->result_, arg->result_format_,
                                       arg->p_status_);
   delete(arg);
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"end real_execution");
+  }
+  // peloton::network::aa_EndProfiling();
 }
 
 void TrafficCop::ExecuteStatementPlanGetResult() {
@@ -256,40 +275,43 @@ void TrafficCop::ExecuteStatementPlanGetResult() {
   if (single_statement_txn_ == true || init_failure == true ||
       txn_result == ResultType::FAILURE) {
     LOG_TRACE(
-        "About to commit: single stmt: %d, init_failure: %d, txn_result: %s",
-        single_statement_txn_, init_failure,
-        ResultTypeToString(txn_result).c_str());
+      "About to commit: single stmt: %d, init_failure: %d, txn_result: %s",
+      single_statement_txn_, init_failure,
+      ResultTypeToString(txn_result).c_str());
     switch (txn_result) {
-      case ResultType::SUCCESS:
-        // Commit single statement
-        LOG_TRACE("Commit Transaction");
-        p_status_.m_result = CommitQueryHelper();
-        break;
+    case ResultType::SUCCESS:
+      // Commit single statement
+      LOG_TRACE("Commit Transaction");
+      p_status_.m_result = CommitQueryHelper();
+      break;
 
-      case ResultType::FAILURE:
-      default:
-        // Abort
-        LOG_TRACE("Abort Transaction");
-        if (single_statement_txn_ == true) {
-          LOG_TRACE("Tcop_txn_state size: %lu", tcop_txn_state_.size());
-          p_status_.m_result = AbortQueryHelper();
-        } else {
-          tcop_txn_state_.top().second = ResultType::ABORTED;
-          p_status_.m_result = ResultType::ABORTED;
-        }
+    case ResultType::FAILURE:
+    default:
+      // Abort
+      LOG_TRACE("Abort Transaction");
+      if (single_statement_txn_ == true) {
+        LOG_TRACE("Tcop_txn_state size: %lu", tcop_txn_state_.size());
+        p_status_.m_result = AbortQueryHelper();
+      } else {
+        tcop_txn_state_.top().second = ResultType::ABORTED;
+        p_status_.m_result = ResultType::ABORTED;
+      }
     }
   }
 }
 
 std::shared_ptr<Statement> TrafficCop::PrepareStatement(
-    const std::string &statement_name, const std::string &query_string,
-    UNUSED_ATTRIBUTE std::string &error_message,
-    const size_t thread_id UNUSED_ATTRIBUTE) {
+  const std::string &statement_name, const std::string &query_string,
+  UNUSED_ATTRIBUTE std::string &error_message,
+  const size_t thread_id UNUSED_ATTRIBUTE) {
   LOG_TRACE("Prepare Statement name: %s", statement_name.c_str());
   LOG_TRACE("Prepare Statement query: %s", query_string.c_str());
 
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"begin PrepareStatement");
+  }
   std::shared_ptr<Statement> statement(
-      new Statement(statement_name, query_string));
+    new Statement(statement_name, query_string));
   // We can learn transaction's states, BEGIN, COMMIT, ABORT, or ROLLBACK from
   // member variables, tcop_txn_state_. We can also get single-statement txn or
   // multi-statement txn from member variable single_statement_txn_
@@ -334,13 +356,15 @@ std::shared_ptr<Statement> TrafficCop::PrepareStatement(
       throw ParserException("Error parsing SQL statement");
     }
     LOG_TRACE("Optimizer Build Peloton Plan Tree...");
+
     auto plan =
-        optimizer_->BuildPelotonPlanTree(sql_stmt, default_database_name_, tcop_txn_state_.top().first);
+      optimizer_->BuildPelotonPlanTree(sql_stmt, default_database_name_, tcop_txn_state_.top().first);
     statement->SetPlanTree(plan);
+
     // Get the tables that our plan references so that we know how to
     // invalidate it at a later point when the catalog changes
     const std::set<oid_t> table_oids =
-        planner::PlanUtil::GetTablesReferenced(plan.get());
+      planner::PlanUtil::GetTablesReferenced(plan.get());
     statement->SetReferencedTables(table_oids);
 
     for (auto& stmt : sql_stmt->GetStatements()) {
@@ -358,6 +382,9 @@ std::shared_ptr<Statement> TrafficCop::PrepareStatement(
       LOG_TRACE("%s", statement->GetPlanTree().get()->GetInfo().c_str());
     }
 #endif
+    if (peloton::network::aa_IsProfiling() == true) {
+      peloton::network::aa_InsertTimePoint((char *)"end planning, end PrepareStatement");
+    }
     return statement;
   } catch (Exception &e) {
     error_message = e.what();
@@ -374,15 +401,15 @@ std::shared_ptr<Statement> TrafficCop::PrepareStatement(
 }
 
 void TrafficCop::GetDataTables(
-    parser::TableRef *from_table,
-    std::vector<storage::DataTable *> &target_tables) {
+  parser::TableRef *from_table,
+  std::vector<storage::DataTable *> &target_tables) {
   if (from_table == nullptr) return;
 
   if (from_table->list.empty()) {
     if (from_table->join == NULL) {
       auto *target_table = catalog::Catalog::GetInstance()->GetTableWithName(
-          from_table->GetDatabaseName(), from_table->GetTableName(),
-          GetCurrentTxnState().first);
+                             from_table->GetDatabaseName(), from_table->GetTableName(),
+                             GetCurrentTxnState().first);
       target_tables.push_back(target_table);
     } else {
       GetDataTables(from_table->join->left.get(), target_tables);
@@ -399,7 +426,7 @@ void TrafficCop::GetDataTables(
 }
 
 std::vector<FieldInfo> TrafficCop::GenerateTupleDescriptor(
-    parser::SQLStatement *sql_stmt) {
+  parser::SQLStatement *sql_stmt) {
   std::vector<FieldInfo> tuple_descriptor;
   if (sql_stmt->GetType() != StatementType::SELECT) return tuple_descriptor;
   auto select_stmt = (parser::SelectStatement *)sql_stmt;
@@ -428,20 +455,20 @@ std::vector<FieldInfo> TrafficCop::GenerateTupleDescriptor(
         auto &table_columns = target_table->GetSchema()->GetColumns();
         for (auto column : table_columns) {
           tuple_descriptor.push_back(
-              GetColumnFieldForValueType(column.GetName(), column.GetType()));
+            GetColumnFieldForValueType(column.GetName(), column.GetType()));
         }
       }
     } else {
       std::string col_name;
       if (expr->alias.empty()) {
         col_name = expr->expr_name_.empty()
-                       ? std::string("expr") + std::to_string(count)
-                       : expr->expr_name_;
+                   ? std::string("expr") + std::to_string(count)
+                   : expr->expr_name_;
       } else {
         col_name = expr->alias;
       }
       tuple_descriptor.push_back(
-          GetColumnFieldForValueType(col_name, expr->GetValueType()));
+        GetColumnFieldForValueType(col_name, expr->GetValueType()));
     }
   }
 
@@ -449,56 +476,56 @@ std::vector<FieldInfo> TrafficCop::GenerateTupleDescriptor(
 }
 
 FieldInfo TrafficCop::GetColumnFieldForValueType(std::string column_name,
-                                                 type::TypeId column_type) {
+    type::TypeId column_type) {
   PostgresValueType field_type;
   size_t field_size;
   switch (column_type) {
-    case type::TypeId::BOOLEAN:
-    case type::TypeId::TINYINT: {
-      field_type = PostgresValueType::BOOLEAN;
-      field_size = 1;
-      break;
-    }
-    case type::TypeId::SMALLINT: {
-      field_type = PostgresValueType::SMALLINT;
-      field_size = 2;
-      break;
-    }
-    case type::TypeId::INTEGER: {
-      field_type = PostgresValueType::INTEGER;
-      field_size = 4;
-      break;
-    }
-    case type::TypeId::BIGINT: {
-      field_type = PostgresValueType::BIGINT;
-      field_size = 8;
-      break;
-    }
-    case type::TypeId::DECIMAL: {
-      field_type = PostgresValueType::DOUBLE;
-      field_size = 8;
-      break;
-    }
-    case type::TypeId::VARCHAR:
-    case type::TypeId::VARBINARY: {
-      field_type = PostgresValueType::TEXT;
-      field_size = 255;
-      break;
-    }
-    case type::TypeId::TIMESTAMP: {
-      field_type = PostgresValueType::TIMESTAMPS;
-      field_size = 64;  // FIXME: Bytes???
-      break;
-    }
-    default: {
-      // Type not Identified
-      LOG_ERROR("Unrecognized field type '%s' for field '%s'",
-                TypeIdToString(column_type).c_str(),
-                column_name.c_str());
-      field_type = PostgresValueType::TEXT;
-      field_size = 255;
-      break;
-    }
+  case type::TypeId::BOOLEAN:
+  case type::TypeId::TINYINT: {
+    field_type = PostgresValueType::BOOLEAN;
+    field_size = 1;
+    break;
+  }
+  case type::TypeId::SMALLINT: {
+    field_type = PostgresValueType::SMALLINT;
+    field_size = 2;
+    break;
+  }
+  case type::TypeId::INTEGER: {
+    field_type = PostgresValueType::INTEGER;
+    field_size = 4;
+    break;
+  }
+  case type::TypeId::BIGINT: {
+    field_type = PostgresValueType::BIGINT;
+    field_size = 8;
+    break;
+  }
+  case type::TypeId::DECIMAL: {
+    field_type = PostgresValueType::DOUBLE;
+    field_size = 8;
+    break;
+  }
+  case type::TypeId::VARCHAR:
+  case type::TypeId::VARBINARY: {
+    field_type = PostgresValueType::TEXT;
+    field_size = 255;
+    break;
+  }
+  case type::TypeId::TIMESTAMP: {
+    field_type = PostgresValueType::TIMESTAMPS;
+    field_size = 64;  // FIXME: Bytes???
+    break;
+  }
+  default: {
+    // Type not Identified
+    LOG_ERROR("Unrecognized field type '%s' for field '%s'",
+              TypeIdToString(column_type).c_str(),
+              column_name.c_str());
+    field_type = PostgresValueType::TEXT;
+    field_size = 255;
+    break;
+  }
   }
   // HACK: Convert the type into a oid_t
   // This ugly and I don't like it one bit...
@@ -507,7 +534,7 @@ FieldInfo TrafficCop::GetColumnFieldForValueType(std::string column_name,
 }
 
 FieldInfo TrafficCop::GetColumnFieldForAggregates(std::string name,
-                                                  ExpressionType expr_type) {
+    ExpressionType expr_type) {
   // For now we only return INT for (MAX , MIN)
   // TODO: Check if column type is DOUBLE and return it for (MAX. MIN)
 
@@ -517,32 +544,32 @@ FieldInfo TrafficCop::GetColumnFieldForAggregates(std::string name,
 
   // Check the expression type and return the corresponding description
   switch (expr_type) {
-    case ExpressionType::AGGREGATE_MAX:
-    case ExpressionType::AGGREGATE_MIN:
-    case ExpressionType::AGGREGATE_COUNT: {
-      field_type = PostgresValueType::INTEGER;
-      field_size = 4;
-      field_name = name;
-      break;
-    }
-    // Return a DOUBLE if the functiob is AVG
-    case ExpressionType::AGGREGATE_AVG: {
-      field_type = PostgresValueType::DOUBLE;
-      field_size = 8;
-      field_name = name;
-      break;
-    }
-    case ExpressionType::AGGREGATE_COUNT_STAR: {
-      field_type = PostgresValueType::INTEGER;
-      field_size = 4;
-      field_name = "COUNT(*)";
-      break;
-    }
-    default: {
-      field_type = PostgresValueType::TEXT;
-      field_size = 255;
-      field_name = name;
-    }
+  case ExpressionType::AGGREGATE_MAX:
+  case ExpressionType::AGGREGATE_MIN:
+  case ExpressionType::AGGREGATE_COUNT: {
+    field_type = PostgresValueType::INTEGER;
+    field_size = 4;
+    field_name = name;
+    break;
+  }
+  // Return a DOUBLE if the functiob is AVG
+  case ExpressionType::AGGREGATE_AVG: {
+    field_type = PostgresValueType::DOUBLE;
+    field_size = 8;
+    field_name = name;
+    break;
+  }
+  case ExpressionType::AGGREGATE_COUNT_STAR: {
+    field_type = PostgresValueType::INTEGER;
+    field_size = 4;
+    field_name = "COUNT(*)";
+    break;
+  }
+  default: {
+    field_type = PostgresValueType::TEXT;
+    field_size = 255;
+    field_name = name;
+  }
   }  // SWITCH
   return std::make_tuple(field_name, static_cast<oid_t>(field_type),
                          field_size);

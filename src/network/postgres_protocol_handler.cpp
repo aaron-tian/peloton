@@ -32,27 +32,118 @@
 namespace peloton {
 namespace network {
 
+// aa_profiling {start}
+struct aa_TimePoint {
+  struct timeval time_;
+  char* point_name_;
+};
+
+#define aa_max_time_points_ 1000
+
+// static const int aa_max_time_points_ = 50;
+static int aa_total_count_ = 0;
+static struct timeval aa_begin_time_;
+static struct aa_TimePoint aa_time_points_[aa_max_time_points_]; // at most 50 time points.
+static int aa_time_point_count_ = 0;
+static bool aa_is_profiling_ = false;
+
+void aa_BeginProfiling() {
+
+  if (aa_is_profiling_ == true) {
+    return;
+  }
+
+  ++aa_total_count_;
+
+  gettimeofday(&aa_begin_time_, NULL);
+
+  aa_time_point_count_ = 0;
+  aa_is_profiling_ = true;
+}
+
+void aa_EndProfiling() {
+
+  if (aa_is_profiling_ == false) {
+    return;
+  }
+  struct timeval end_time;
+  gettimeofday(&end_time, NULL);
+
+  // if (aa_total_count_ % 500 == 0) {
+  char buf[100];
+  sprintf(buf, "/home/aarontian/peloton/profile_%ld.txt", aa_begin_time_.tv_sec);
+  FILE *fp = fopen(buf, "a");
+
+
+
+  fprintf(fp, "=================================\n");
+  fprintf(fp, "txn count = %d\n", aa_total_count_);
+
+  fprintf(fp, "begin clock: %lf\n", aa_begin_time_.tv_sec * 1000.0 * 1000.0 + aa_begin_time_.tv_usec);
+  int i;
+  for (i = 0; i < aa_time_point_count_; ++i) {
+    double diff = (aa_time_points_[i].time_.tv_sec - aa_begin_time_.tv_sec) * 1000.0 * 1000.0;
+    diff += (aa_time_points_[i].time_.tv_usec - aa_begin_time_.tv_usec);
+
+    fprintf(fp, "point: %s, time: %lf us, clock: %lf\n", aa_time_points_[i].point_name_, diff, aa_time_points_[i].time_.tv_sec * 1000.0 * 1000.0 + aa_time_points_[i].time_.tv_usec);
+  }
+
+  double diff = (end_time.tv_sec - aa_begin_time_.tv_sec) * 1000.0 * 1000.0;
+  diff += (end_time.tv_usec - aa_begin_time_.tv_usec);
+
+  fprintf(fp, "point: END, time: %lf us, clock: %lf\n", diff, end_time.tv_sec * 1000.0 * 1000.0 + end_time.tv_usec);
+
+  fclose(fp);
+  // }
+
+  aa_time_point_count_ = 0;
+  aa_is_profiling_ = false;
+
+  printf("filename = %s\n", buf);
+}
+
+bool aa_IsProfiling() {
+  return aa_is_profiling_;
+}
+
+void aa_InsertTimePoint(char* point_name) {
+  if (aa_time_point_count_ < 0 || aa_time_point_count_ > aa_max_time_points_) {
+    return;
+  }
+  struct aa_TimePoint *time_point = &(aa_time_points_[aa_time_point_count_]);
+
+  gettimeofday(&(time_point->time_), NULL);
+
+
+
+  time_point->point_name_ = point_name;
+
+  ++aa_time_point_count_;
+}
+// aa_profiling {end}
+
+
 // TODO: Remove hardcoded auth strings
 // Hardcoded authentication strings used during session startup. To be removed
 const std::unordered_map<std::string, std::string>
-    // clang-format off
-    PostgresProtocolHandler::parameter_status_map_ =
-        boost::assign::map_list_of("application_name", "psql")
-				("client_encoding", "UTF8")
-				("DateStyle", "ISO, MDY")
-				("integer_datetimes", "on")
-				("IntervalStyle", "postgres")
-				("is_superuser", "on")
-				("server_encoding", "UTF8")
-				("server_version", "9.5devel")
-				("session_authorization", "postgres")
-				("standard_conforming_strings", "on")
-				("TimeZone", "US/Eastern");
+// clang-format off
+PostgresProtocolHandler::parameter_status_map_ =
+  boost::assign::map_list_of("application_name", "psql")
+  ("client_encoding", "UTF8")
+  ("DateStyle", "ISO, MDY")
+  ("integer_datetimes", "on")
+  ("IntervalStyle", "postgres")
+  ("is_superuser", "on")
+  ("server_encoding", "UTF8")
+  ("server_version", "9.5devel")
+  ("session_authorization", "postgres")
+  ("standard_conforming_strings", "on")
+  ("TimeZone", "US/Eastern");
 // clang-format on
 
 PostgresProtocolHandler::PostgresProtocolHandler(tcop::TrafficCop *traffic_cop)
-    : ProtocolHandler(traffic_cop),
-      txn_state_(NetworkTransactionStateType::IDLE) {
+  : ProtocolHandler(traffic_cop),
+    txn_state_(NetworkTransactionStateType::IDLE) {
 }
 
 PostgresProtocolHandler::~PostgresProtocolHandler() {}
@@ -61,13 +152,13 @@ PostgresProtocolHandler::~PostgresProtocolHandler() {}
 void PostgresProtocolHandler::ReplanPreparedStatement(Statement *statement) {
   std::string error_message;
   auto new_statement = traffic_cop_->PrepareStatement(
-      statement->GetStatementName(), statement->GetQueryString(),
-      error_message);
+                         statement->GetStatementName(), statement->GetQueryString(),
+                         error_message);
   // But then rip out its query plan and stick it in our old statement
   if (new_statement.get() == nullptr) {
     LOG_ERROR(
-        "Failed to generate a new query plan for PreparedStatement '%s'\n%s",
-        statement->GetStatementName().c_str(), error_message.c_str());
+      "Failed to generate a new query plan for PreparedStatement '%s'\n%s",
+      statement->GetStatementName().c_str(), error_message.c_str());
   } else {
     LOG_DEBUG("Generating new plan for PreparedStatement '%s'",
               statement->GetStatementName().c_str());
@@ -104,7 +195,7 @@ void PostgresProtocolHandler::SendInitialResponse() {
 }
 
 void PostgresProtocolHandler::MakeHardcodedParameterStatus(
-    const std::pair<std::string, std::string> &kv) {
+  const std::pair<std::string, std::string> &kv) {
   std::unique_ptr<OutputPacket> response(new OutputPacket());
   response->msg_type = NetworkMessageType::PARAMETER_STATUS;
   PacketPutString(response.get(), kv.first);
@@ -114,7 +205,7 @@ void PostgresProtocolHandler::MakeHardcodedParameterStatus(
 
 
 void PostgresProtocolHandler::PutTupleDescriptor(
-    const std::vector<FieldInfo> &tuple_descriptor) {
+  const std::vector<FieldInfo> &tuple_descriptor) {
   if (tuple_descriptor.empty()) return;
 
   std::unique_ptr<OutputPacket> pkt(new OutputPacket());
@@ -140,7 +231,7 @@ void PostgresProtocolHandler::PutTupleDescriptor(
 }
 
 void PostgresProtocolHandler::SendDataRows(std::vector<StatementResult> &results,
-                                 int colcount, int &rows_affected) {
+    int colcount, int &rows_affected) {
   if (results.empty() || colcount == 0) return;
 
   size_t numrows = results.size() / colcount;
@@ -175,32 +266,32 @@ void PostgresProtocolHandler::CompleteCommand(const std::string &query, const Qu
   Statement::ParseQueryTypeString(query, query_type_string);
   std::string tag = query_type_string ;
   switch (query_type) {
-    /* After Begin, we enter a txn block */
-    case QueryType::QUERY_BEGIN:
-      txn_state_ = NetworkTransactionStateType::BLOCK;
-      break;
-    /* After commit, we end the txn block */
-    case QueryType::QUERY_COMMIT:
-    /* After rollback, the txn block is ended */
-    case QueryType::QUERY_ROLLBACK:
-      txn_state_ = NetworkTransactionStateType::IDLE;
-      break;
-    case QueryType::QUERY_INSERT:
-      tag += " 0 " + std::to_string(rows);
-      break;
-    case QueryType::QUERY_CREATE: {
-      std::string create_type_string;
-      Statement::ParseCreateTypeString(query, create_type_string);
-      tag += " " + create_type_string;
-      break;
-    }
-    case QueryType::QUERY_PREPARE:
-      break;
-    default:
-      tag += " " + std::to_string(rows);
-   }
-   PacketPutString(pkt.get(), tag);
-   responses.push_back(std::move(pkt));
+  /* After Begin, we enter a txn block */
+  case QueryType::QUERY_BEGIN:
+    txn_state_ = NetworkTransactionStateType::BLOCK;
+    break;
+  /* After commit, we end the txn block */
+  case QueryType::QUERY_COMMIT:
+  /* After rollback, the txn block is ended */
+  case QueryType::QUERY_ROLLBACK:
+    txn_state_ = NetworkTransactionStateType::IDLE;
+    break;
+  case QueryType::QUERY_INSERT:
+    tag += " 0 " + std::to_string(rows);
+    break;
+  case QueryType::QUERY_CREATE: {
+    std::string create_type_string;
+    Statement::ParseCreateTypeString(query, create_type_string);
+    tag += " " + create_type_string;
+    break;
+  }
+  case QueryType::QUERY_PREPARE:
+    break;
+  default:
+    tag += " " + std::to_string(rows);
+  }
+  PacketPutString(pkt.get(), tag);
+  responses.push_back(std::move(pkt));
 }
 
 /*
@@ -214,24 +305,24 @@ void PostgresProtocolHandler::SendEmptyQueryResponse() {
 
 bool PostgresProtocolHandler::HardcodedExecuteFilter(QueryType query_type) {
   switch (query_type) {
-    // Skip SET
-    case QueryType::QUERY_SET:
-    case QueryType::QUERY_SHOW:
+  // Skip SET
+  case QueryType::QUERY_SET:
+  case QueryType::QUERY_SHOW:
+    return false;
+  // Skip duplicate BEGIN
+  case QueryType::QUERY_BEGIN:
+    if (txn_state_ == NetworkTransactionStateType::BLOCK) {
       return false;
-    // Skip duplicate BEGIN
-    case QueryType::QUERY_BEGIN:
-      if (txn_state_ == NetworkTransactionStateType::BLOCK) {
-        return false;
-      }
-      break;
-    // Skip duuplicate Commits and Rollbacks
-    case QueryType::QUERY_COMMIT:
-    case QueryType::QUERY_ROLLBACK:
-      if (txn_state_ == NetworkTransactionStateType::IDLE) {
-        return false;
-      }
-    default:
-      break;
+    }
+    break;
+  // Skip duuplicate Commits and Rollbacks
+  case QueryType::QUERY_COMMIT:
+  case QueryType::QUERY_ROLLBACK:
+    if (txn_state_ == NetworkTransactionStateType::IDLE) {
+      return false;
+    }
+  default:
+    break;
   }
   return true;
 }
@@ -270,124 +361,154 @@ ProcessResult PostgresProtocolHandler::ExecQueryMessage(InputPacket *pkt, const 
     query_type_ = query_type;
 
     switch (query_type) {
-      case QueryType::QUERY_PREPARE:
-      {
-        std::string statement_name;
-        std::vector<std::string> tokens;
-        boost::split(tokens, query_, boost::is_any_of("(), "));
-        statement_name = tokens.at(1);
-        std::size_t pos = boost::to_upper_copy(query_).find("AS");
-        std::string statement_query = query_.substr(pos + 3);
-        boost::trim(statement_query);
+    case QueryType::QUERY_PREPARE:
+    {
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"begin QUERY_PREPARE");
+      }
+      std::string statement_name;
+      std::vector<std::string> tokens;
+      boost::split(tokens, query_, boost::is_any_of("(), "));
+      statement_name = tokens.at(1);
+      std::size_t pos = boost::to_upper_copy(query_).find("AS");
+      std::string statement_query = query_.substr(pos + 3);
+      boost::trim(statement_query);
 
-        // Prepare statement
-        std::shared_ptr<Statement> statement(nullptr);
+      // Prepare statement
+      std::shared_ptr<Statement> statement(nullptr);
 
-        LOG_DEBUG("PrepareStatement[%s] => %s", statement_name.c_str(),
+      LOG_DEBUG("PrepareStatement[%s] => %s", statement_name.c_str(),
                 statement_query.c_str());
 
-        statement = traffic_cop_->PrepareStatement(statement_name, statement_query,
-                                                 error_message);
-        if (statement.get() == nullptr) {
-          skipped_stmt_ = true;
-          SendErrorResponse(
-              {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
-          LOG_TRACE("ExecQuery Error");
-          SendReadyForQuery(NetworkTransactionStateType::IDLE);
-          return ProcessResult::COMPLETE;
+      statement = traffic_cop_->PrepareStatement(statement_name, statement_query,
+                  error_message);
+      if (statement.get() == nullptr) {
+        skipped_stmt_ = true;
+        SendErrorResponse(
+        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+        LOG_TRACE("ExecQuery Error");
+        SendReadyForQuery(NetworkTransactionStateType::IDLE);
+        if (aa_IsProfiling() == true) {
+          aa_InsertTimePoint((char *)"end QUERY_PREPARE, error");
         }
-
-        auto entry = std::make_pair(statement_name, statement);
-        statement_cache_.insert(entry);
-        for (auto table_id : statement->GetReferencedTables()) {
-          table_statement_cache_[table_id].push_back(statement.get());
-        }
-        break;
-      }
-      case QueryType::QUERY_EXECUTE:
-      {
-        std::string statement_name;
-        std::vector<type::Value> param_values;
-        bool unnamed = false;
-        std::vector<std::string> tokens;
-
-        boost::split(tokens, query, boost::is_any_of("(), "));
-
-        statement_name = tokens.at(1);
-        auto statement_cache_itr = statement_cache_.find(statement_name);
-        if (statement_cache_itr != statement_cache_.end()) {
-          statement_ = *statement_cache_itr;
-        }
-        // Did not find statement with same name
-        else {
-          error_message_ = "The prepared statement does not exist";
-          LOG_ERROR("%s", error_message_.c_str());
-          SendErrorResponse(
-              {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
-          SendReadyForQuery(NetworkTransactionStateType::IDLE);
-          return ProcessResult::COMPLETE;
-        }
-
-        query_type_ = statement_->GetQueryType();
-        query_ = statement_->GetQueryString();
-        std::vector<int> result_format(statement_->GetTupleDescriptor().size(), 0);
-        result_format_ = result_format;
-
-        for (std::size_t idx = 2; idx < tokens.size(); idx++) {
-          std::string param_str = tokens.at(idx);
-          boost::trim(param_str);
-          if (param_str.empty()) {
-            continue;
-          }
-          param_values.push_back(type::ValueFactory::GetVarcharValue(param_str));
-        }
-
-        if (param_values.size() > 0) {
-          statement_->GetPlanTree()->SetParameterValues(&param_values);
-        }
-        param_values_ = param_values;
-
-        auto status =
-                traffic_cop_->ExecuteStatement(statement_, param_values_, unnamed, nullptr, result_format_,
-                             results_, rows_affected_, error_message_, thread_id);
-
-        if (traffic_cop_->is_queuing_) {
-          return ProcessResult::PROCESSING;
-        }
-
-        ExecQueryMessageGetResult(status);
         return ProcessResult::COMPLETE;
       }
-      default:
-      {
-        // prepareStatement
-        std::string unnamed_statement = "unnamed";
-        statement_ = traffic_cop_->PrepareStatement(unnamed_statement, query_,
-                                                    error_message);
-        if (statement_.get() == nullptr) {
-          rows_affected = 0;
-          SendErrorResponse(
-            {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
-          SendReadyForQuery(NetworkTransactionStateType::IDLE);
-          return ProcessResult::COMPLETE;
+
+      auto entry = std::make_pair(statement_name, statement);
+      statement_cache_.insert(entry);
+      for (auto table_id : statement->GetReferencedTables()) {
+        table_statement_cache_[table_id].push_back(statement.get());
+      }
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"end QUERY_PREPARE");
+      }
+      break;
+    }
+    case QueryType::QUERY_EXECUTE:
+    {
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"begin QUERY_EXECUTE");
+      }
+      std::string statement_name;
+      std::vector<type::Value> param_values;
+      bool unnamed = false;
+      std::vector<std::string> tokens;
+
+      boost::split(tokens, query, boost::is_any_of("(), "));
+
+      statement_name = tokens.at(1);
+      auto statement_cache_itr = statement_cache_.find(statement_name);
+      if (statement_cache_itr != statement_cache_.end()) {
+        statement_ = *statement_cache_itr;
+      }
+      // Did not find statement with same name
+      else {
+        error_message_ = "The prepared statement does not exist";
+        LOG_ERROR("%s", error_message_.c_str());
+        SendErrorResponse(
+        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
+        SendReadyForQuery(NetworkTransactionStateType::IDLE);
+        if (aa_IsProfiling() == true) {
+          aa_InsertTimePoint((char *)"end QUERY_EXECUTE, error");
         }
-        // ExecuteStatment
-        std::vector<type::Value> param_values;
-        param_values_ = param_values;
-        bool unnamed = false;
-        std::vector<int> result_format(statement_->GetTupleDescriptor().size(), 0);
-        result_format_ = result_format;
-        // should param_values and result_format be local variable?
-        // should results_ be reset when PakcetManager.reset(), why results_ cannot be read?
-        auto status =
-            traffic_cop_->ExecuteStatement(statement_, param_values_, unnamed, nullptr, result_format_,
-                                           results_, rows_affected_, error_message_, thread_id);
-        if (traffic_cop_->is_queuing_) {
-          return ProcessResult::PROCESSING;
-        }
-        ExecQueryMessageGetResult(status);
         return ProcessResult::COMPLETE;
       }
+
+      query_type_ = statement_->GetQueryType();
+      query_ = statement_->GetQueryString();
+      std::vector<int> result_format(statement_->GetTupleDescriptor().size(), 0);
+      result_format_ = result_format;
+
+      for (std::size_t idx = 2; idx < tokens.size(); idx++) {
+        std::string param_str = tokens.at(idx);
+        boost::trim(param_str);
+        if (param_str.empty()) {
+          continue;
+        }
+        param_values.push_back(type::ValueFactory::GetVarcharValue(param_str));
+      }
+
+      if (param_values.size() > 0) {
+        statement_->GetPlanTree()->SetParameterValues(&param_values);
+      }
+      param_values_ = param_values;
+
+      auto status =
+        traffic_cop_->ExecuteStatement(statement_, param_values_, unnamed, nullptr, result_format_,
+                                       results_, rows_affected_, error_message_, thread_id);
+
+      if (traffic_cop_->is_queuing_) {
+        return ProcessResult::PROCESSING;
+      }
+
+      ExecQueryMessageGetResult(status);
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"end QUERY_EXECUTE, error");
+      }
+      return ProcessResult::COMPLETE;
+    }
+    default:
+    {
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"begin QUERY_default");
+      }
+      // prepareStatement
+      std::string unnamed_statement = "unnamed";
+      statement_ = traffic_cop_->PrepareStatement(unnamed_statement, query_,
+                   error_message);
+      if (statement_.get() == nullptr) {
+        rows_affected = 0;
+        SendErrorResponse(
+        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+        SendReadyForQuery(NetworkTransactionStateType::IDLE);
+        if (aa_IsProfiling() == true) {
+          aa_InsertTimePoint((char *)"end QUERY_default, error");
+        }
+        return ProcessResult::COMPLETE;
+      }
+      // ExecuteStatment
+      std::vector<type::Value> param_values;
+      param_values_ = param_values;
+      bool unnamed = false;
+      std::vector<int> result_format(statement_->GetTupleDescriptor().size(), 0);
+      result_format_ = result_format;
+      // should param_values and result_format be local variable?
+      // should results_ be reset when PakcetManager.reset(), why results_ cannot be read?
+      auto status =
+        traffic_cop_->ExecuteStatement(statement_, param_values_, unnamed, nullptr, result_format_,
+                                       results_, rows_affected_, error_message_, thread_id);
+      if (traffic_cop_->is_queuing_) {
+        if (aa_IsProfiling() == true) {
+          aa_InsertTimePoint((char *)"end QUERY_default, PROCESSING");
+        }
+        return ProcessResult::PROCESSING;
+      }
+      ExecQueryMessageGetResult(status);
+      if (aa_IsProfiling() == true) {
+        aa_InsertTimePoint((char *)"end QUERY_default, COMPLETE");
+      }
+      return ProcessResult::COMPLETE;
+    }
     }
 
     // send the attribute names
@@ -418,7 +539,7 @@ void PostgresProtocolHandler::ExecQueryMessageGetResult(ResultType status) {
     tuple_descriptor = statement_->GetTupleDescriptor();
   } else if (status == ResultType::FAILURE) { // check status
     SendErrorResponse(
-        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
     SendReadyForQuery(NetworkTransactionStateType::IDLE);
     return;
   }
@@ -469,11 +590,11 @@ void PostgresProtocolHandler::ExecParseMessage(InputPacket *pkt) {
   LOG_DEBUG("PrepareStatement[%s] => %s", statement_name.c_str(),
             query_string.c_str());
   statement = traffic_cop_->PrepareStatement(statement_name, query_string,
-                                             error_message);
+              error_message);
   if (statement.get() == nullptr) {
     skipped_stmt_ = true;
     SendErrorResponse(
-        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
     LOG_TRACE("ExecParse Error");
     return;
   }
@@ -547,9 +668,9 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
   // error handling
   if (num_params_format != num_params) {
     std::string error_message =
-        "Malformed request: num_params_format is not equal to num_params";
+      "Malformed request: num_params_format is not equal to num_params";
     SendErrorResponse(
-        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
     return;
   }
 
@@ -567,7 +688,7 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
       std::string error_message = "Invalid unnamed statement";
       LOG_ERROR("%s", error_message.c_str());
       SendErrorResponse(
-          {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+      {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
       return;
     }
     // NAMED STATEMENT
@@ -582,7 +703,7 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
       std::string error_message = "The prepared statement does not exist";
       LOG_ERROR("%s", error_message.c_str());
       SendErrorResponse(
-          {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+      {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
       return;
     }
   }
@@ -624,12 +745,12 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
   if (format_codes_number == 0) {
     // using the default text format
     result_format_ =
-        std::vector<int>(statement->GetTupleDescriptor().size(), 0);
+      std::vector<int>(statement->GetTupleDescriptor().size(), 0);
   } else if (format_codes_number == 1) {
     // get the format code from packet
     auto result_format = PacketGetInt(pkt, 2);
     result_format_ = std::vector<int>(
-        statement->GetTupleDescriptor().size(), result_format);
+                       statement->GetTupleDescriptor().size(), result_format);
   } else {
     // get the format code for each column
     result_format_.clear();
@@ -662,13 +783,13 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
     PL_ASSERT(val_buf_len > 0);
 
     param_stat.reset(new stats::QueryMetric::QueryParams(
-        param_format_buf, param_type_buf, param_val_buf, num_params));
+                       param_format_buf, param_type_buf, param_val_buf, num_params));
   }
 
   // Construct a portal.
   // Notice that this will move param_values so no value will be left there.
   auto portal =
-      new Portal(portal_name, statement, std::move(param_values), param_stat);
+    new Portal(portal_name, statement, std::move(param_values), param_stat);
   std::shared_ptr<Portal> portal_reference(portal);
 
   auto itr = portals_.find(portal_name);
@@ -687,7 +808,7 @@ void PostgresProtocolHandler::ExecBindMessage(InputPacket *pkt) {
 }
 
 size_t PostgresProtocolHandler::ReadParamType(InputPacket *pkt, int num_params,
-                                    std::vector<int32_t> &param_types) {
+    std::vector<int32_t> &param_types) {
   auto begin = pkt->ptr;
   // get the type of each parameter
   for (int i = 0; i < num_params; i++) {
@@ -699,7 +820,7 @@ size_t PostgresProtocolHandler::ReadParamType(InputPacket *pkt, int num_params,
 }
 
 size_t PostgresProtocolHandler::ReadParamFormat(InputPacket *pkt, int num_params_format,
-                                      std::vector<int16_t> &formats) {
+    std::vector<int16_t> &formats) {
   auto begin = pkt->ptr;
   // get the format of each parameter
   for (int i = 0; i < num_params_format; i++) {
@@ -711,9 +832,9 @@ size_t PostgresProtocolHandler::ReadParamFormat(InputPacket *pkt, int num_params
 
 // For consistency, this function assumes the input vectors has the correct size
 size_t PostgresProtocolHandler::ReadParamValue(
-    InputPacket *pkt, int num_params, std::vector<int32_t> &param_types,
-    std::vector<std::pair<type::TypeId, std::string>> &bind_parameters,
-    std::vector<type::Value> &param_values, std::vector<int16_t> &formats) {
+  InputPacket *pkt, int num_params, std::vector<int32_t> &param_types,
+  std::vector<std::pair<type::TypeId, std::string>> &bind_parameters,
+  std::vector<type::Value> &param_values, std::vector<int16_t> &formats) {
   auto begin = pkt->ptr;
   ByteBuf param;
   for (int param_idx = 0; param_idx < num_params; param_idx++) {
@@ -722,11 +843,11 @@ size_t PostgresProtocolHandler::ReadParamValue(
     if (param_len == -1) {
       // NULL mode
       auto peloton_type = PostgresValueTypeToPelotonValueType(
-          static_cast<PostgresValueType>(param_types[param_idx]));
+                            static_cast<PostgresValueType>(param_types[param_idx]));
       bind_parameters[param_idx] =
-          std::make_pair(peloton_type, std::string(""));
+        std::make_pair(peloton_type, std::string(""));
       param_values[param_idx] =
-          type::ValueFactory::GetNullValueByType(peloton_type);
+        type::ValueFactory::GetNullValueByType(peloton_type);
     } else {
       PacketGetBytes(pkt, param_len, param);
 
@@ -734,69 +855,69 @@ size_t PostgresProtocolHandler::ReadParamValue(
         // TEXT mode
         std::string param_str = std::string(std::begin(param), std::end(param));
         bind_parameters[param_idx] =
-            std::make_pair(type::TypeId::VARCHAR, param_str);
+          std::make_pair(type::TypeId::VARCHAR, param_str);
         if ((unsigned int)param_idx >= param_types.size() ||
             PostgresValueTypeToPelotonValueType(
-                (PostgresValueType)param_types[param_idx]) ==
-                type::TypeId::VARCHAR) {
+              (PostgresValueType)param_types[param_idx]) ==
+            type::TypeId::VARCHAR) {
           param_values[param_idx] =
-              type::ValueFactory::GetVarcharValue(param_str);
+            type::ValueFactory::GetVarcharValue(param_str);
         } else {
           param_values[param_idx] =
-              (type::ValueFactory::GetVarcharValue(param_str))
-                  .CastAs(PostgresValueTypeToPelotonValueType(
+            (type::ValueFactory::GetVarcharValue(param_str))
+            .CastAs(PostgresValueTypeToPelotonValueType(
                       (PostgresValueType)param_types[param_idx]));
         }
         PL_ASSERT(param_values[param_idx].GetTypeId() != type::TypeId::INVALID);
       } else {
         // BINARY mode
         switch (static_cast<PostgresValueType>(param_types[param_idx])) {
-          case PostgresValueType::INTEGER: {
-            int int_val = 0;
-            for (size_t i = 0; i < sizeof(int); ++i) {
-              int_val = (int_val << 8) | param[i];
-            }
-            bind_parameters[param_idx] =
-                std::make_pair(type::TypeId::INTEGER, std::to_string(int_val));
-            param_values[param_idx] =
-                type::ValueFactory::GetIntegerValue(int_val).Copy();
-            break;
+        case PostgresValueType::INTEGER: {
+          int int_val = 0;
+          for (size_t i = 0; i < sizeof(int); ++i) {
+            int_val = (int_val << 8) | param[i];
           }
-          case PostgresValueType::BIGINT: {
-            int64_t int_val = 0;
-            for (size_t i = 0; i < sizeof(int64_t); ++i) {
-              int_val = (int_val << 8) | param[i];
-            }
-            bind_parameters[param_idx] =
-                std::make_pair(type::TypeId::BIGINT, std::to_string(int_val));
-            param_values[param_idx] =
-                type::ValueFactory::GetBigIntValue(int_val).Copy();
-            break;
+          bind_parameters[param_idx] =
+            std::make_pair(type::TypeId::INTEGER, std::to_string(int_val));
+          param_values[param_idx] =
+            type::ValueFactory::GetIntegerValue(int_val).Copy();
+          break;
+        }
+        case PostgresValueType::BIGINT: {
+          int64_t int_val = 0;
+          for (size_t i = 0; i < sizeof(int64_t); ++i) {
+            int_val = (int_val << 8) | param[i];
           }
-          case PostgresValueType::DOUBLE: {
-            double float_val = 0;
-            unsigned long buf = 0;
-            for (size_t i = 0; i < sizeof(double); ++i) {
-              buf = (buf << 8) | param[i];
-            }
-            PL_MEMCPY(&float_val, &buf, sizeof(double));
-            bind_parameters[param_idx] =
-                std::make_pair(type::TypeId::DECIMAL, std::to_string(float_val));
-            param_values[param_idx] =
-                type::ValueFactory::GetDecimalValue(float_val).Copy();
-            break;
+          bind_parameters[param_idx] =
+            std::make_pair(type::TypeId::BIGINT, std::to_string(int_val));
+          param_values[param_idx] =
+            type::ValueFactory::GetBigIntValue(int_val).Copy();
+          break;
+        }
+        case PostgresValueType::DOUBLE: {
+          double float_val = 0;
+          unsigned long buf = 0;
+          for (size_t i = 0; i < sizeof(double); ++i) {
+            buf = (buf << 8) | param[i];
           }
-          case PostgresValueType::VARBINARY: {
-            bind_parameters[param_idx] = std::make_pair(type::TypeId::VARBINARY,
-                std::string(reinterpret_cast<char *>(&param[0]), param_len));
-            param_values[param_idx] = type::ValueFactory::GetVarbinaryValue(
-                &param[0], param_len, true);
-            break;
-          }
-          default: {
-            LOG_ERROR("Do not support data type: %d", param_types[param_idx]);
-            break;
-          }
+          PL_MEMCPY(&float_val, &buf, sizeof(double));
+          bind_parameters[param_idx] =
+            std::make_pair(type::TypeId::DECIMAL, std::to_string(float_val));
+          param_values[param_idx] =
+            type::ValueFactory::GetDecimalValue(float_val).Copy();
+          break;
+        }
+        case PostgresValueType::VARBINARY: {
+          bind_parameters[param_idx] = std::make_pair(type::TypeId::VARBINARY,
+                                       std::string(reinterpret_cast<char *>(&param[0]), param_len));
+          param_values[param_idx] = type::ValueFactory::GetVarbinaryValue(
+                                      &param[0], param_len, true);
+          break;
+        }
+        default: {
+          LOG_ERROR("Do not support data type: %d", param_types[param_idx]);
+          break;
+        }
         }
         PL_ASSERT(param_values[param_idx].GetTypeId() != type::TypeId::INVALID);
       }
@@ -851,7 +972,7 @@ ProcessResult PostgresProtocolHandler::ExecDescribeMessage(InputPacket *pkt) {
 }
 
 ProcessResult PostgresProtocolHandler::ExecExecuteMessage(InputPacket *pkt,
-                                       const size_t thread_id) {
+    const size_t thread_id) {
   // EXECUTE message
   protocol_type_ = NetworkProtocolType::POSTGRES_JDBC;
   std::string error_message, portal_name;
@@ -877,7 +998,7 @@ ProcessResult PostgresProtocolHandler::ExecExecuteMessage(InputPacket *pkt,
   if (portal.get() == nullptr) {
     LOG_ERROR("Did not find portal : %s", portal_name.c_str());
     SendErrorResponse(
-        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
     SendReadyForQuery(txn_state_);
     return ProcessResult::TERMINATE;
   }
@@ -888,7 +1009,7 @@ ProcessResult PostgresProtocolHandler::ExecExecuteMessage(InputPacket *pkt,
   if (statement_.get() == nullptr) {
     LOG_ERROR("Did not find statement in portal : %s", portal_name.c_str());
     SendErrorResponse(
-        {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message}});
     SendReadyForQuery(txn_state_);
     return ProcessResult::TERMINATE;
   }
@@ -898,8 +1019,8 @@ ProcessResult PostgresProtocolHandler::ExecExecuteMessage(InputPacket *pkt,
   param_values_ = portal->GetParameters();
 
   auto status = traffic_cop_->ExecuteStatement(
-      statement_, param_values_, unnamed, param_stat, result_format_, results_,
-      rows_affected_, error_message_, thread_id);
+                  statement_, param_values_, unnamed, param_stat, result_format_, results_,
+                  rows_affected_, error_message_, thread_id);
   if (traffic_cop_->is_queuing_) {
     return ProcessResult::PROCESSING;
   }
@@ -910,27 +1031,30 @@ ProcessResult PostgresProtocolHandler::ExecExecuteMessage(InputPacket *pkt,
 void PostgresProtocolHandler::ExecExecuteMessageGetResult(ResultType status) {
   const auto &query_type = statement_->GetQueryType();
   switch (status) {
-    case ResultType::FAILURE:
-      LOG_ERROR("Failed to execute: %s", error_message_.c_str());
-      SendErrorResponse(
-          {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
-      return;
-    case ResultType::ABORTED:
-      if (query_type != QueryType::QUERY_ROLLBACK) {
-        LOG_DEBUG("Failed to execute: Conflicting txn aborted");
-        // Send an error response if the abort is not due to ROLLBACK query
-        SendErrorResponse({{NetworkMessageType::SQLSTATE_CODE_ERROR,
-                            SqlStateErrorCodeToString(
-                                SqlStateErrorCode::SERIALIZATION_ERROR)}});
-      }
-      return;
-    default: {
-      auto tuple_descriptor = statement_->GetTupleDescriptor();
-      SendDataRows(results_, tuple_descriptor.size(), rows_affected_);
-      // The reponse to ExecuteCommand is the query_type string token.
-      CompleteCommand(statement_->GetQueryTypeString(), query_type, rows_affected_);
-      return;
+  case ResultType::FAILURE:
+    LOG_ERROR("Failed to execute: %s", error_message_.c_str());
+    SendErrorResponse(
+    {{NetworkMessageType::HUMAN_READABLE_ERROR, error_message_}});
+    return;
+  case ResultType::ABORTED:
+    if (query_type != QueryType::QUERY_ROLLBACK) {
+      LOG_DEBUG("Failed to execute: Conflicting txn aborted");
+      // Send an error response if the abort is not due to ROLLBACK query
+      SendErrorResponse({{
+          NetworkMessageType::SQLSTATE_CODE_ERROR,
+          SqlStateErrorCodeToString(
+            SqlStateErrorCode::SERIALIZATION_ERROR)
+        }
+      });
     }
+    return;
+  default: {
+    auto tuple_descriptor = statement_->GetTupleDescriptor();
+    SendDataRows(results_, tuple_descriptor.size(), rows_affected_);
+    // The reponse to ExecuteCommand is the query_type string token.
+    CompleteCommand(statement_->GetQueryTypeString(), query_type, rows_affected_);
+    return;
+  }
   }
 }
 
@@ -938,13 +1062,13 @@ void PostgresProtocolHandler::GetResult() {
   traffic_cop_->ExecuteStatementPlanGetResult();
   auto status = traffic_cop_->ExecuteStatementGetResult(rows_affected_);
   switch (protocol_type_) {
-    case NetworkProtocolType::POSTGRES_JDBC:
-      LOG_TRACE("JDBC result");
-      ExecExecuteMessageGetResult(status);
-      break;
-    case NetworkProtocolType::POSTGRES_PSQL:
-      LOG_TRACE("PSQL result");
-      ExecQueryMessageGetResult(status);
+  case NetworkProtocolType::POSTGRES_JDBC:
+    LOG_TRACE("JDBC result");
+    ExecExecuteMessageGetResult(status);
+    break;
+  case NetworkProtocolType::POSTGRES_PSQL:
+    LOG_TRACE("PSQL result");
+    ExecQueryMessageGetResult(status);
   }
 }
 
@@ -955,27 +1079,27 @@ void PostgresProtocolHandler::ExecCloseMessage(InputPacket *pkt) {
   PacketGetString(pkt, 0, name);
   bool is_unnamed = (name.size() == 0) ? true : false;
   switch (close_type) {
-    case 'S':
-      LOG_TRACE("Deleting statement %s from cache", name.c_str());
-      if (is_unnamed) {
-        unnamed_statement_.reset();
-      } else {
-        // TODO: Invalidate table_statement_cache!
-        statement_cache_.delete_key(name);
-      }
-      break;
-    case 'P': {
-      LOG_TRACE("Deleting portal %s from cache", name.c_str());
-      auto portal_itr = portals_.find(name);
-      if (portal_itr != portals_.end()) {
-        // delete portal if it exists
-        portals_.erase(portal_itr);
-      }
-      break;
+  case 'S':
+    LOG_TRACE("Deleting statement %s from cache", name.c_str());
+    if (is_unnamed) {
+      unnamed_statement_.reset();
+    } else {
+      // TODO: Invalidate table_statement_cache!
+      statement_cache_.delete_key(name);
     }
-    default:
-      // do nothing, simply send close complete
-      break;
+    break;
+  case 'P': {
+    LOG_TRACE("Deleting portal %s from cache", name.c_str());
+    auto portal_itr = portals_.find(name);
+    if (portal_itr != portals_.end()) {
+      // delete portal if it exists
+      portals_.erase(portal_itr);
+    }
+    break;
+  }
+  default:
+    // do nothing, simply send close complete
+    break;
   }
   // Send close complete response
   std::unique_ptr<OutputPacket> response(new OutputPacket());
@@ -998,7 +1122,7 @@ bool PostgresProtocolHandler::ReadPacketHeader(Buffer& rbuf, InputPacket& rpkt) 
   // get packet size from the header
   // Header also contains msg type
   rpkt.msg_type =
-      static_cast<NetworkMessageType>(rbuf.GetByte(rbuf.buf_ptr));
+    static_cast<NetworkMessageType>(rbuf.GetByte(rbuf.buf_ptr));
   // Skip the message type byte
   rbuf.buf_ptr++;
 
@@ -1088,55 +1212,134 @@ ProcessResult PostgresProtocolHandler::Process(Buffer &rbuf, const size_t thread
  */
 ProcessResult PostgresProtocolHandler::ProcessPacket(InputPacket *pkt, const size_t thread_id) {
   LOG_TRACE("Message type: %c", static_cast<unsigned char>(pkt->msg_type));
+
+  printf("Message type: %c\n", static_cast<unsigned char>(pkt->msg_type));
   // We don't set force_flush to true for `PBDE` messages because they're
   // part of the extended protocol. Buffer responses and don't flush until
   // we see a SYNC
   switch (pkt->msg_type) {
-    case NetworkMessageType::SIMPLE_QUERY_COMMAND: {
-      LOG_TRACE("SIMPLE_QUERY_COMMAND");
-      SetFlushFlag(true);
-      return ExecQueryMessage(pkt, thread_id);
+  case NetworkMessageType::SIMPLE_QUERY_COMMAND: {
+    LOG_TRACE("SIMPLE_QUERY_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"SIMPLE_QUERY_COMMAND, begin parse");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"SIMPLE_QUERY_COMMAND, begin parse");
     }
-    case NetworkMessageType::PARSE_COMMAND: {
-      LOG_TRACE("PARSE_COMMAND");
-      ExecParseMessage(pkt);
-    } break;
-    case NetworkMessageType::BIND_COMMAND: {
-      LOG_TRACE("BIND_COMMAND");
-      ExecBindMessage(pkt);
-    } break;
-    case NetworkMessageType::DESCRIBE_COMMAND: {
-      LOG_TRACE("DESCRIBE_COMMAND");
-      return ExecDescribeMessage(pkt);
+    SetFlushFlag(true);
+    ProcessResult rs = ExecQueryMessage(pkt, thread_id);
+    aa_InsertTimePoint((char *)"SIMPLE_QUERY_COMMAND, end");
+    // aa_EndProfiling();
+    return rs;
+  }
+  case NetworkMessageType::PARSE_COMMAND: {
+    LOG_TRACE("PARSE_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"PARSE_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"PARSE_COMMAND, begin");
     }
-    case NetworkMessageType::EXECUTE_COMMAND: {
-      LOG_TRACE("EXECUTE_COMMAND");
-      return ExecExecuteMessage(pkt, thread_id);
+    ExecParseMessage(pkt);
+    aa_InsertTimePoint((char *)"PARSE_COMMAND, end");
+    aa_EndProfiling();
+  } break;
+  case NetworkMessageType::BIND_COMMAND: {
+    LOG_TRACE("BIND_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"BIND_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"BIND_COMMAND, begin");
     }
-    case NetworkMessageType::SYNC_COMMAND: {
-      LOG_TRACE("SYNC_COMMAND");
-      SendReadyForQuery(txn_state_);
-      SetFlushFlag(true);
-    } break;
-    case NetworkMessageType::CLOSE_COMMAND: {
-      LOG_TRACE("CLOSE_COMMAND");
-      ExecCloseMessage(pkt);
-    } break;
-    case NetworkMessageType::TERMINATE_COMMAND: {
-      LOG_TRACE("TERMINATE_COMMAND");
-      SetFlushFlag(true);
-      return ProcessResult::TERMINATE;
+    ExecBindMessage(pkt);
+    aa_InsertTimePoint((char *)"BIND_COMMAND, end");
+    aa_EndProfiling();
+  } break;
+  case NetworkMessageType::DESCRIBE_COMMAND: {
+    LOG_TRACE("DESCRIBE_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"DESCRIBE_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"DESCRIBE_COMMAND, begin");
     }
-    case NetworkMessageType::NULL_COMMAND: {
-      LOG_TRACE("NULL");
-      SetFlushFlag(true);
-      return ProcessResult::TERMINATE;
+    ProcessResult rs = ExecDescribeMessage(pkt);
+    aa_InsertTimePoint((char *)"DESCRIBE_COMMAND, end");
+    aa_EndProfiling();
+    return rs;
+  }
+  case NetworkMessageType::EXECUTE_COMMAND: {
+    LOG_TRACE("EXECUTE_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"EXECUTE_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"EXECUTE_COMMAND, begin");
     }
-    default: {
-      LOG_ERROR("Packet type not supported yet: %d (%c)",
-                static_cast<int>(pkt->msg_type),
-                static_cast<unsigned char>(pkt->msg_type));
+    ProcessResult rs = ExecExecuteMessage(pkt, thread_id);
+    aa_InsertTimePoint((char *)"EXECUTE_COMMAND, end");
+    // aa_EndProfiling();
+    return rs;
+  }
+  case NetworkMessageType::SYNC_COMMAND: {
+    LOG_TRACE("SYNC_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"SYNC_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"SYNC_COMMAND, begin");
     }
+    SendReadyForQuery(txn_state_);
+    SetFlushFlag(true);
+    aa_InsertTimePoint((char *)"SYNC_COMMAND, end");
+    aa_EndProfiling();
+  } break;
+  case NetworkMessageType::CLOSE_COMMAND: {
+    LOG_TRACE("CLOSE_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"CLOSE_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"CLOSE_COMMAND, begin");
+    }
+    ExecCloseMessage(pkt);
+    aa_InsertTimePoint((char *)"CLOSE_COMMAND, end");
+    aa_EndProfiling();
+  } break;
+  case NetworkMessageType::TERMINATE_COMMAND: {
+    LOG_TRACE("TERMINATE_COMMAND");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"TERMINATE_COMMAND, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"TERMINATE_COMMAND, begin");
+    }
+    SetFlushFlag(true);
+    ProcessResult rs = ProcessResult::TERMINATE;
+    aa_InsertTimePoint((char *)"TERMINATE_COMMAND, end");
+    aa_EndProfiling();
+    return rs;
+  }
+  case NetworkMessageType::NULL_COMMAND: {
+    LOG_TRACE("NULL");
+    if (aa_IsProfiling() == true) {
+      aa_InsertTimePoint((char *)"NULL, begin");
+    } else {
+      aa_BeginProfiling();
+      aa_InsertTimePoint((char *)"NULL, begin");
+    }
+    SetFlushFlag(true);
+    ProcessResult rs = ProcessResult::TERMINATE;
+    aa_InsertTimePoint((char *)"NULL, end");
+    aa_EndProfiling();
+    return rs;
+  }
+  default: {
+    LOG_ERROR("Packet type not supported yet: %d (%c)",
+              static_cast<int>(pkt->msg_type),
+              static_cast<unsigned char>(pkt->msg_type));
+  }
   }
   return ProcessResult::COMPLETE;
 }
@@ -1146,7 +1349,7 @@ ProcessResult PostgresProtocolHandler::ProcessPacket(InputPacket *pkt, const siz
  *    For now, it only supports the human readable 'M' message body
  */
 void PostgresProtocolHandler::SendErrorResponse(
-    std::vector<std::pair<NetworkMessageType, std::string>> error_status) {
+  std::vector<std::pair<NetworkMessageType, std::string>> error_status) {
   std::unique_ptr<OutputPacket> pkt(new OutputPacket());
   pkt->msg_type = NetworkMessageType::ERROR_RESPONSE;
 

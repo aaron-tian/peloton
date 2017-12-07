@@ -41,6 +41,7 @@
 #include "storage/data_table.h"
 
 #include "binder/bind_node_visitor.h"
+#include "network/postgres_protocol_handler.h"
 
 using std::vector;
 using std::unordered_map;
@@ -62,11 +63,11 @@ Optimizer::Optimizer() {
   physical_implementation_rules_.emplace_back(new LogicalUpdateToPhysical());
   physical_implementation_rules_.emplace_back(new LogicalInsertToPhysical());
   physical_implementation_rules_.emplace_back(
-      new LogicalInsertSelectToPhysical());
+    new LogicalInsertSelectToPhysical());
   physical_implementation_rules_.emplace_back(
-      new LogicalGroupByToHashGroupBy());
+    new LogicalGroupByToHashGroupBy());
   physical_implementation_rules_.emplace_back(
-      new LogicalGroupByToSortGroupBy());
+    new LogicalGroupByToSortGroupBy());
   physical_implementation_rules_.emplace_back(new LogicalAggregateToPhysical());
   physical_implementation_rules_.emplace_back(new GetToDummyScan());
   physical_implementation_rules_.emplace_back(new GetToSeqScan());
@@ -80,8 +81,12 @@ Optimizer::Optimizer() {
 }
 
 shared_ptr<planner::AbstractPlan> Optimizer::BuildPelotonPlanTree(
-    const unique_ptr<parser::SQLStatementList> &parse_tree_list,
-    const std::string default_database_name, concurrency::Transaction *txn) {
+  const unique_ptr<parser::SQLStatementList> &parse_tree_list,
+  const std::string default_database_name, concurrency::Transaction *txn) {
+
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"begin planning, begin BuildPelotonPlanTree");
+  }
   // Base Case
   if (parse_tree_list->GetStatements().size() == 0) return nullptr;
 
@@ -89,10 +94,16 @@ shared_ptr<planner::AbstractPlan> Optimizer::BuildPelotonPlanTree(
 
   auto parse_tree = parse_tree_list->GetStatements().at(0).get();
 
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"begin Binding");
+  }
   // Run binder
   auto bind_node_visitor =
-      make_shared<binder::BindNodeVisitor>(txn, default_database_name);
+    make_shared<binder::BindNodeVisitor>(txn, default_database_name);
   bind_node_visitor->BindNameToNode(parse_tree);
+  if (peloton::network::aa_IsProfiling() == true) {
+    peloton::network::aa_InsertTimePoint((char *)"end Binding");
+  }
 
   // Handle ddl statement
   bool is_ddl_stmt;
@@ -136,90 +147,90 @@ void Optimizer::Reset() {
 }
 
 unique_ptr<planner::AbstractPlan> Optimizer::HandleDDLStatement(
-    parser::SQLStatement *tree, bool &is_ddl_stmt,
-    concurrency::Transaction *txn) {
+  parser::SQLStatement *tree, bool &is_ddl_stmt,
+  concurrency::Transaction *txn) {
   unique_ptr<planner::AbstractPlan> ddl_plan = nullptr;
   is_ddl_stmt = true;
   auto stmt_type = tree->GetType();
   switch (stmt_type) {
-    case StatementType::DROP: {
-      LOG_TRACE("Adding Drop plan...");
-      unique_ptr<planner::AbstractPlan> drop_plan(
-          new planner::DropPlan((parser::DropStatement *)tree));
-      ddl_plan = move(drop_plan);
-      break;
-    }
+  case StatementType::DROP: {
+    LOG_TRACE("Adding Drop plan...");
+    unique_ptr<planner::AbstractPlan> drop_plan(
+      new planner::DropPlan((parser::DropStatement *)tree));
+    ddl_plan = move(drop_plan);
+    break;
+  }
 
-    case StatementType::CREATE: {
-      LOG_TRACE("Adding Create plan...");
+  case StatementType::CREATE: {
+    LOG_TRACE("Adding Create plan...");
 
-      // This is adapted from the simple optimizer
-      auto create_plan =
-          new planner::CreatePlan((parser::CreateStatement *)tree);
-      std::unique_ptr<planner::AbstractPlan> child_CreatePlan(create_plan);
-      ddl_plan = move(child_CreatePlan);
+    // This is adapted from the simple optimizer
+    auto create_plan =
+      new planner::CreatePlan((parser::CreateStatement *)tree);
+    std::unique_ptr<planner::AbstractPlan> child_CreatePlan(create_plan);
+    ddl_plan = move(child_CreatePlan);
 
-      if (create_plan->GetCreateType() == peloton::CreateType::INDEX) {
-        auto create_stmt = (parser::CreateStatement *)tree;
-        auto target_table = catalog::Catalog::GetInstance()->GetTableWithName(
-            create_stmt->GetDatabaseName(), create_stmt->GetTableName(), txn);
-        std::vector<oid_t> column_ids;
-        // use catalog object instead of schema to acquire metadata
-        auto table_object = catalog::Catalog::GetInstance()->GetTableObject(
-            create_stmt->GetDatabaseName(), create_stmt->GetTableName(), txn);
-        for (auto column_name : create_plan->GetIndexAttributes()) {
-          auto column_object = table_object->GetColumnObject(column_name);
-          // Check if column is missing
-          if (column_object == nullptr)
-            throw CatalogException(
-                "Some columns are missing when create index " +
-                std::string(create_stmt->index_name));
-          oid_t col_pos = column_object->GetColumnId();
-          column_ids.push_back(col_pos);
-        }
-        // Create a plan to retrieve data
-        std::unique_ptr<planner::SeqScanPlan> child_SeqScanPlan(
-            new planner::SeqScanPlan(target_table, nullptr, column_ids, false));
-
-        child_SeqScanPlan->AddChild(std::move(ddl_plan));
-        ddl_plan = std::move(child_SeqScanPlan);
-        // Create a plan to add data to index
-        std::unique_ptr<planner::AbstractPlan> child_PopulateIndexPlan(
-            new planner::PopulateIndexPlan(target_table, column_ids));
-        child_PopulateIndexPlan->AddChild(std::move(ddl_plan));
-        create_plan->SetKeyAttrs(column_ids);
-        ddl_plan = std::move(child_PopulateIndexPlan);
+    if (create_plan->GetCreateType() == peloton::CreateType::INDEX) {
+      auto create_stmt = (parser::CreateStatement *)tree;
+      auto target_table = catalog::Catalog::GetInstance()->GetTableWithName(
+                            create_stmt->GetDatabaseName(), create_stmt->GetTableName(), txn);
+      std::vector<oid_t> column_ids;
+      // use catalog object instead of schema to acquire metadata
+      auto table_object = catalog::Catalog::GetInstance()->GetTableObject(
+                            create_stmt->GetDatabaseName(), create_stmt->GetTableName(), txn);
+      for (auto column_name : create_plan->GetIndexAttributes()) {
+        auto column_object = table_object->GetColumnObject(column_name);
+        // Check if column is missing
+        if (column_object == nullptr)
+          throw CatalogException(
+            "Some columns are missing when create index " +
+            std::string(create_stmt->index_name));
+        oid_t col_pos = column_object->GetColumnId();
+        column_ids.push_back(col_pos);
       }
-      break;
+      // Create a plan to retrieve data
+      std::unique_ptr<planner::SeqScanPlan> child_SeqScanPlan(
+        new planner::SeqScanPlan(target_table, nullptr, column_ids, false));
+
+      child_SeqScanPlan->AddChild(std::move(ddl_plan));
+      ddl_plan = std::move(child_SeqScanPlan);
+      // Create a plan to add data to index
+      std::unique_ptr<planner::AbstractPlan> child_PopulateIndexPlan(
+        new planner::PopulateIndexPlan(target_table, column_ids));
+      child_PopulateIndexPlan->AddChild(std::move(ddl_plan));
+      create_plan->SetKeyAttrs(column_ids);
+      ddl_plan = std::move(child_PopulateIndexPlan);
     }
-    case StatementType::TRANSACTION: {
-      break;
-    }
-    case StatementType::ANALYZE: {
-      LOG_TRACE("Adding Analyze plan...");
-      unique_ptr<planner::AbstractPlan> analyze_plan(new planner::AnalyzePlan(
+    break;
+  }
+  case StatementType::TRANSACTION: {
+    break;
+  }
+  case StatementType::ANALYZE: {
+    LOG_TRACE("Adding Analyze plan...");
+    unique_ptr<planner::AbstractPlan> analyze_plan(new planner::AnalyzePlan(
           static_cast<parser::AnalyzeStatement *>(tree), txn));
-      ddl_plan = move(analyze_plan);
-      break;
-    }
-    case StatementType::COPY: {
-      LOG_TRACE("Adding Copy plan...");
-      parser::CopyStatement *copy_parse_tree =
-          static_cast<parser::CopyStatement *>(tree);
-      ddl_plan = util::CreateCopyPlan(copy_parse_tree);
-      break;
-    }
-    default:
-      is_ddl_stmt = false;
+    ddl_plan = move(analyze_plan);
+    break;
+  }
+  case StatementType::COPY: {
+    LOG_TRACE("Adding Copy plan...");
+    parser::CopyStatement *copy_parse_tree =
+      static_cast<parser::CopyStatement *>(tree);
+    ddl_plan = util::CreateCopyPlan(copy_parse_tree);
+    break;
+  }
+  default:
+    is_ddl_stmt = false;
   }
   return ddl_plan;
 }
 
 shared_ptr<GroupExpression> Optimizer::InsertQueryTree(
-    parser::SQLStatement *tree, concurrency::Transaction *txn) {
+  parser::SQLStatement *tree, concurrency::Transaction *txn) {
   QueryToOperatorTransformer converter(txn);
   shared_ptr<OperatorExpression> initial =
-      converter.ConvertToOpExpression(tree);
+    converter.ConvertToOpExpression(tree);
   shared_ptr<GroupExpression> gexpr;
   RecordTransformedExpression(initial, gexpr);
   return gexpr;
@@ -231,10 +242,10 @@ PropertySet Optimizer::GetQueryRequiredProperties(parser::SQLStatement *tree) {
 }
 
 unique_ptr<planner::AbstractPlan> Optimizer::OptimizerPlanToPlannerPlan(
-    shared_ptr<OperatorExpression> plan, PropertySet &requirements,
-    vector<PropertySet> &required_input_props,
-    vector<unique_ptr<planner::AbstractPlan>> &children_plans,
-    vector<ExprMap> &children_expr_map, ExprMap *output_expr_map) {
+  shared_ptr<OperatorExpression> plan, PropertySet &requirements,
+  vector<PropertySet> &required_input_props,
+  vector<unique_ptr<planner::AbstractPlan>> &children_plans,
+  vector<ExprMap> &children_expr_map, ExprMap *output_expr_map) {
   OperatorToPlanTransformer transformer;
   return transformer.ConvertOpExpression(plan, &requirements,
                                          &required_input_props, children_plans,
@@ -242,7 +253,7 @@ unique_ptr<planner::AbstractPlan> Optimizer::OptimizerPlanToPlannerPlan(
 }
 
 unique_ptr<planner::AbstractPlan> Optimizer::ChooseBestPlan(
-    GroupID id, PropertySet requirements, ExprMap *output_expr_map) {
+  GroupID id, PropertySet requirements, ExprMap *output_expr_map) {
   Group *group = memo_.GetGroupByID(id);
   shared_ptr<GroupExpression> gexpr = group->GetBestExpression(requirements);
 
@@ -251,7 +262,7 @@ unique_ptr<planner::AbstractPlan> Optimizer::ChooseBestPlan(
 
   vector<GroupID> child_groups = gexpr->GetChildGroupIDs();
   vector<PropertySet> required_input_props =
-      gexpr->GetInputProperties(requirements);
+    gexpr->GetInputProperties(requirements);
   PL_ASSERT(required_input_props.size() == child_groups.size());
 
   // Derive chidren plans first because they are useful in the derivation of
@@ -270,7 +281,7 @@ unique_ptr<planner::AbstractPlan> Optimizer::ChooseBestPlan(
 
   // Derive root plan
   shared_ptr<OperatorExpression> op =
-      make_shared<OperatorExpression>(gexpr->Op());
+    make_shared<OperatorExpression>(gexpr->Op());
 
   auto plan = OptimizerPlanToPlannerPlan(op, requirements, required_input_props,
                                          children_plans, children_expr_map,
@@ -303,7 +314,7 @@ void Optimizer::OptimizeExpression(shared_ptr<GroupExpression> gexpr,
   PL_ASSERT(gexpr->Op().IsPhysical());
 
   vector<pair<PropertySet, vector<PropertySet>>> output_input_property_pairs =
-      DeriveChildProperties(gexpr, requirements);
+    DeriveChildProperties(gexpr, requirements);
 
   size_t num_property_pairs = output_input_property_pairs.size();
 
@@ -313,7 +324,7 @@ void Optimizer::OptimizeExpression(shared_ptr<GroupExpression> gexpr,
        ++pair_offset) {
     auto output_properties = output_input_property_pairs[pair_offset].first;
     const auto &input_properties_list =
-        output_input_property_pairs[pair_offset].second;
+      output_input_property_pairs[pair_offset].second;
 
     vector<shared_ptr<Stats>> best_child_stats;
     vector<double> best_child_costs;
@@ -325,8 +336,8 @@ void Optimizer::OptimizeExpression(shared_ptr<GroupExpression> gexpr,
 
       // Find best child expression
       shared_ptr<GroupExpression> best_expression =
-          memo_.GetGroupByID(child_group_id)
-              ->GetBestExpression(input_properties);
+        memo_.GetGroupByID(child_group_id)
+        ->GetBestExpression(input_properties);
       // TODO(abpoms): we should allow for failure in the case where no
       // expression
       // can provide the required properties
@@ -364,7 +375,7 @@ void Optimizer::OptimizeExpression(shared_ptr<GroupExpression> gexpr,
 
       if (output_properties.HasProperty(*property) == false) {
         gexpr =
-            EnforceProperty(gexpr, output_properties, property, requirements);
+          EnforceProperty(gexpr, output_properties, property, requirements);
         group->SetExpressionCost(gexpr, gexpr->GetCost(output_properties),
                                  output_properties);
       }
@@ -381,9 +392,9 @@ void Optimizer::OptimizeExpression(shared_ptr<GroupExpression> gexpr,
 
 Property *Optimizer::GenerateNewPropertyCols(PropertySet requirements) {
   auto cols_prop = requirements.GetPropertyOfType(PropertyType::COLUMNS)
-                       ->As<PropertyColumns>();
+                   ->As<PropertyColumns>();
   auto sort_prop =
-      requirements.GetPropertyOfType(PropertyType::SORT)->As<PropertySort>();
+    requirements.GetPropertyOfType(PropertyType::SORT)->As<PropertySort>();
 
   // Check if there is any missing columns from orderby need to be added
   ExprSet columns_set;
@@ -408,7 +419,7 @@ Property *Optimizer::GenerateNewPropertyCols(PropertySet requirements) {
   if (columns_set.size() > cols_prop->GetSize()) {
     // Some orderby exprs are not in original PropertyColumns. Return new one
     vector<shared_ptr<expression::AbstractExpression>> columns(
-        columns_set.begin(), columns_set.end());
+          columns_set.begin(), columns_set.end());
     return new PropertyColumns(move(columns));
   } else {
     // PropertyColumns already have all the orderby expr. Return the nullptr
@@ -417,8 +428,8 @@ Property *Optimizer::GenerateNewPropertyCols(PropertySet requirements) {
 }
 
 shared_ptr<GroupExpression> Optimizer::EnforceProperty(
-    shared_ptr<GroupExpression> gexpr, PropertySet &output_properties,
-    const shared_ptr<Property> property, PropertySet &requirements) {
+  shared_ptr<GroupExpression> gexpr, PropertySet &output_properties,
+  const shared_ptr<Property> property, PropertySet &requirements) {
   // new child input is the old output
   auto child_input_properties = vector<PropertySet>();
   child_input_properties.push_back(output_properties);
@@ -430,19 +441,19 @@ shared_ptr<GroupExpression> Optimizer::EnforceProperty(
 
   PropertyEnforcer enforcer(column_manager_);
   auto enforced_gexpr =
-      enforcer.EnforceProperty(gexpr, &output_properties, property);
+    enforcer.EnforceProperty(gexpr, &output_properties, property);
 
   // the new enforced gexpr have the same GrouID as the parent expr
   // The enforced expression may already exist
   enforced_gexpr =
-      memo_.InsertExpression(enforced_gexpr, gexpr->GetGroupID(), true);
+    memo_.InsertExpression(enforced_gexpr, gexpr->GetGroupID(), true);
 
   // For orderby, Restore the PropertyColumn back to the original one so that
   // orderby does not output the additional columns only used in order by
   if (property->Type() == PropertyType::SORT) {
     output_properties.RemoveProperty(PropertyType::COLUMNS);
     output_properties.AddProperty(
-        requirements.GetPropertyOfType(PropertyType::COLUMNS));
+      requirements.GetPropertyOfType(PropertyType::COLUMNS));
   }
   // If the property with the same type exists, remove it first
   // For example, when enforcing PropertyColumns, there will already be a
@@ -465,15 +476,15 @@ shared_ptr<GroupExpression> Optimizer::EnforceProperty(
 }
 
 vector<pair<PropertySet, vector<PropertySet>>> Optimizer::DeriveChildProperties(
-    shared_ptr<GroupExpression> gexpr, PropertySet requirements) {
+  shared_ptr<GroupExpression> gexpr, PropertySet requirements) {
   ChildPropertyGenerator converter(column_manager_);
   return converter.GetProperties(gexpr, requirements, &memo_);
 }
 
 void Optimizer::DeriveCostAndStats(
-    shared_ptr<GroupExpression> gexpr, const PropertySet &output_properties,
-    const vector<PropertySet> &input_properties_list,
-    vector<shared_ptr<Stats>> child_stats, vector<double> child_costs) {
+  shared_ptr<GroupExpression> gexpr, const PropertySet &output_properties,
+  const vector<PropertySet> &input_properties_list,
+  vector<shared_ptr<Stats>> child_stats, vector<double> child_costs) {
   CostAndStatsCalculator calculator(column_manager_);
   calculator.CalculateCostAndStats(gexpr, &output_properties,
                                    &input_properties_list, child_stats,
@@ -508,7 +519,7 @@ void Optimizer::ExploreExpression(shared_ptr<GroupExpression> gexpr) {
     // of some rule creates a match for a previously applied rule, but it is
     // missed because the prev rule was already checked
     vector<shared_ptr<GroupExpression>> candidates =
-        TransformExpression(gexpr, *(rule.get()));
+                                       TransformExpression(gexpr, *(rule.get()));
 
     for (shared_ptr<GroupExpression> candidate : candidates) {
       // Explore the expression
@@ -552,7 +563,7 @@ void Optimizer::ImplementExpression(shared_ptr<GroupExpression> gexpr) {
 //////////////////////////////////////////////////////////////////////////////
 /// Rule application
 vector<shared_ptr<GroupExpression>> Optimizer::TransformExpression(
-    shared_ptr<GroupExpression> gexpr, const Rule &rule) {
+shared_ptr<GroupExpression> gexpr, const Rule &rule) {
   shared_ptr<Pattern> pattern = rule.GetMatchPattern();
 
   vector<shared_ptr<GroupExpression>> output_plans;
@@ -576,7 +587,7 @@ vector<shared_ptr<GroupExpression>> Optimizer::TransformExpression(
                   plan->Op().name().c_str());
         shared_ptr<GroupExpression> new_gexpr;
         bool new_expression =
-            RecordTransformedExpression(plan, new_gexpr, gexpr->GetGroupID());
+          RecordTransformedExpression(plan, new_gexpr, gexpr->GetGroupID());
         if (new_expression) {
           LOG_TRACE("Expression with op %s was inserted into group %d",
                     plan->Op().name().c_str(), new_gexpr->GetGroupID());
@@ -591,7 +602,7 @@ vector<shared_ptr<GroupExpression>> Optimizer::TransformExpression(
 //////////////////////////////////////////////////////////////////////////////
 /// Memo insertion
 shared_ptr<GroupExpression> Optimizer::MakeGroupExpression(
-    shared_ptr<OperatorExpression> expr) {
+  shared_ptr<OperatorExpression> expr) {
   vector<GroupID> child_groups;
   for (auto &child : expr->Children()) {
     auto gexpr = MakeGroupExpression(child);
@@ -602,13 +613,13 @@ shared_ptr<GroupExpression> Optimizer::MakeGroupExpression(
 }
 
 bool Optimizer::RecordTransformedExpression(
-    shared_ptr<OperatorExpression> expr, shared_ptr<GroupExpression> &gexpr) {
+  shared_ptr<OperatorExpression> expr, shared_ptr<GroupExpression> &gexpr) {
   return RecordTransformedExpression(expr, gexpr, UNDEFINED_GROUP);
 }
 
 bool Optimizer::RecordTransformedExpression(shared_ptr<OperatorExpression> expr,
-                                            shared_ptr<GroupExpression> &gexpr,
-                                            GroupID target_group) {
+    shared_ptr<GroupExpression> &gexpr,
+    GroupID target_group) {
   gexpr = MakeGroupExpression(expr);
   return memo_.InsertExpression(gexpr, target_group, false) != gexpr;
 }

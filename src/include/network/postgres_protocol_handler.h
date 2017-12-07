@@ -32,10 +32,18 @@ namespace peloton {
 
 namespace network {
 
+
+/* aa_profiling begin */
+extern void aa_BeginProfiling();
+extern void aa_EndProfiling();
+extern bool aa_IsProfiling();
+extern void aa_InsertTimePoint(char* point_name);
+/* aa_profiling end */
+
 typedef std::vector<std::unique_ptr<OutputPacket>> ResponseBuffer;
 
 class PostgresProtocolHandler: public ProtocolHandler {
- public:
+public:
   // TODO we need to somehow make this virtual?
   PostgresProtocolHandler(tcop::TrafficCop *traffic_cop);
 
@@ -80,9 +88,9 @@ class PostgresProtocolHandler: public ProtocolHandler {
 
   // Deserialize the parameter value from packet
   static size_t ReadParamValue(
-      InputPacket* pkt, int num_params, std::vector<int32_t>& param_types,
-      std::vector<std::pair<type::TypeId, std::string>>& bind_parameters,
-      std::vector<type::Value>& param_values, std::vector<int16_t>& formats);
+    InputPacket* pkt, int num_params, std::vector<int32_t>& param_types,
+    std::vector<std::pair<type::TypeId, std::string>>& bind_parameters,
+    std::vector<type::Value>& param_values, std::vector<int16_t>& formats);
 
 
   // Packet Reading Function
@@ -90,7 +98,7 @@ class PostgresProtocolHandler: public ProtocolHandler {
   static bool ReadPacket(Buffer &rbuf, InputPacket &rpkt);
 
 
- private:
+private:
 
   // Packet Reading Function
   // Extracts the header of a Postgres packet from the read socket buffer
@@ -99,9 +107,9 @@ class PostgresProtocolHandler: public ProtocolHandler {
   //===--------------------------------------------------------------------===//
   // PROTOCOL HANDLING FUNCTIONS
   //===--------------------------------------------------------------------===//
-   // Generic error protocol packet
+  // Generic error protocol packet
   void SendErrorResponse(
-      std::vector<std::pair<NetworkMessageType, std::string>> error_status);
+    std::vector<std::pair<NetworkMessageType, std::string>> error_status);
 
   // Sends ready for query packet to the frontend
   void SendReadyForQuery(NetworkTransactionStateType txn_status);
@@ -124,7 +132,7 @@ class PostgresProtocolHandler: public ProtocolHandler {
    * packets during startup
    */
   void MakeHardcodedParameterStatus(
-      const std::pair<std::string, std::string>& kv);
+    const std::pair<std::string, std::string>& kv);
 
   /* We don't support "SET" and "SHOW" SQL commands yet.
    * Also, duplicate BEGINs and COMMITs shouldn't be executed.
@@ -196,7 +204,7 @@ class PostgresProtocolHandler: public ProtocolHandler {
   // stored
   // in stat table is destroyed
   std::unordered_map<std::string, stats::QueryMetric::QueryParamBuf>
-      statement_param_types_;
+  statement_param_types_;
 
   //TODO: should this stay in traffic_cop?
   std::shared_ptr<Statement> statement_;
@@ -223,7 +231,7 @@ class PostgresProtocolHandler: public ProtocolHandler {
   //===--------------------------------------------------------------------===//
 
   static const std::unordered_map<std::string, std::string>
-      parameter_status_map_;
+  parameter_status_map_;
 
 };
 
