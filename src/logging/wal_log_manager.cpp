@@ -18,6 +18,7 @@
 #include "logging/wal_recovery.h"
 #include "logging/wal_logger.h"
 #include "settings/settings_manager.h"
+#include "network/postgres_protocol_handler.h"
 
 namespace peloton {
 namespace logging {
@@ -25,6 +26,7 @@ namespace logging {
 // Method to enqueue the logging task
 ResultType WalLogManager::LogTransaction(std::vector<LogRecord> log_records) {
   LogTransactionArg* arg = new LogTransactionArg(log_records);
+  peloton::network::aa_InsertTimePoint((char *)"Before SubmitTask_WriteTransactionWrapper");
   threadpool::LoggerQueuePool::GetInstance().SubmitTask(
       WalLogManager::WriteTransactionWrapper, arg, task_callback_,
       task_callback_arg_);
@@ -34,9 +36,12 @@ ResultType WalLogManager::LogTransaction(std::vector<LogRecord> log_records) {
 
 // Static method that accepts void pointer
 void WalLogManager::WriteTransactionWrapper(void* arg_ptr) {
+  peloton::network::aa_InsertTimePoint((char *)"begin WriteTransactionWrapper");
   LogTransactionArg* arg = (LogTransactionArg*)arg_ptr;
   WriteTransaction(arg->log_records_);
+  peloton::network::aa_InsertTimePoint((char *)"Before delete_arg_WriteTransactionWrapper");
   delete (arg);
+  peloton::network::aa_InsertTimePoint((char *)"end WriteTransactionWrapper");
 }
 
 // Actual method called by the logger thread

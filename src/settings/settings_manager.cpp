@@ -98,6 +98,7 @@ const std::string SettingsManager::GetInfo() const {
   info.append(StringUtil::Format("%28s:   %-28s\n", "Index Tuner", GetBool(SettingId::index_tuner) ? "enabled" : "disabled"));
   info.append(StringUtil::Format("%28s:   %-28s\n", "Layout Tuner", GetBool(SettingId::layout_tuner) ? "enabled" : "disabled"));
   info.append(StringUtil::Format("%28s:   %-28s\n", "Code-generation", GetBool(SettingId::codegen) ? "enabled" : "disabled"));
+  info.append(StringUtil::Format("%28s:   %-28s\n", "Log Directory", GetBool(SettingId::log_directory) ? "enabled" : "disabled"));
 
   return StringBoxUtil::Box(info);
 }

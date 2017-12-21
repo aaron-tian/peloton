@@ -23,6 +23,7 @@
 
 #include <ctime>
 #include <string>
+#include <sys/time.h>
 
 // Fix for PRId64 (See https://stackoverflow.com/a/18719205)
 #if defined(__cplusplus) && !defined(__STDC_FORMAT_MACROS)

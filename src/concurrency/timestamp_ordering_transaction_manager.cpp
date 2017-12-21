@@ -24,6 +24,8 @@
 
 #include "threadpool/logger_queue_pool.h"
 
+#include "network/postgres_protocol_handler.h"
+
 namespace peloton {
 namespace concurrency {
 
@@ -777,6 +779,7 @@ void TimestampOrderingTransactionManager::PerformDelete(
 // LogManager comes from above
 ResultType TimestampOrderingTransactionManager::CommitTransaction(
     Transaction *const current_txn, logging::WalLogManager *log_manager) {
+  peloton::network::aa_InsertTimePoint((char *)"Begin CommitTransaction");
   LOG_TRACE("Committing peloton txn : %" PRId64,
             current_txn->GetTransactionId());
 

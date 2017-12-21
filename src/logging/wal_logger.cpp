@@ -24,26 +24,35 @@
 #include "logging/wal_logger.h"
 #include "logging/wal_log_manager.h"
 
+#include "network/postgres_protocol_handler.h"
+
 namespace peloton {
 namespace logging {
 
 // Gets all the records created on the txn rw set and logs them.
 void WalLogger::WriteTransaction(std::vector<LogRecord> log_records) {
   LogBuffer *buf = new LogBuffer();
+  peloton::network::aa_InsertTimePoint((char *)"Before forloop_WriteRecordToBuffer");
   for (LogRecord record : log_records) {
     CopySerializeOutput *output = WriteRecordToBuffer(record);
     if (!buf->WriteData(output->Data(), output->Size())) {
+      peloton::network::aa_InsertTimePoint((char *)"Before WriteData_PersistLogBuffer");
       PersistLogBuffer(buf);
+      peloton::network::aa_InsertTimePoint((char *)"After WriteData_PersistLogBuffer");
       delete buf;
       buf = new LogBuffer();
     }
     delete output;
   }
+  peloton::network::aa_InsertTimePoint((char *)"After forloop_WriteRecordToBuffer");
   if (!buf->Empty()) {
+    peloton::network::aa_InsertTimePoint((char *)"Before Empty_PersistLogBuffer");
     PersistLogBuffer(buf);
+    peloton::network::aa_InsertTimePoint((char *)"After Empty_PersistLogBuffer");
     delete buf;
   }
 }
+
 CopySerializeOutput *WalLogger::WriteRecordToBuffer(LogRecord &record) {
   // Reset the output buffer
   CopySerializeOutput *output_buffer = new CopySerializeOutput();

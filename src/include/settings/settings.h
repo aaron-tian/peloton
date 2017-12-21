@@ -118,7 +118,7 @@ SETTING_bool(layout_tuner,
 
 SETTING_bool(codegen,
             "Enable code-generation for query execution (default: true)",
-            true,
+            false,
             true, true)
 
 //===----------------------------------------------------------------------===//

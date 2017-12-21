@@ -14,6 +14,7 @@
 #include <include/network/postgres_protocol_handler.h>
 #include "network/network_connection.h"
 #include "network/protocol_handler_factory.h"
+#include "network/postgres_protocol_handler.h"
 
 #define SSL_MESSAGE_VERNO 80877103
 #define PROTO_MAJOR_VERSION(x) x >> 16
@@ -666,6 +667,7 @@ void NetworkConnection::StateMachine(NetworkConnection *conn) {
       }
 
       case ConnState::CONN_READ: {
+        aa_InsertTimePoint((char *)"begin ConnState::CONN_READ");
         auto res = conn->FillReadBuffer();
         switch (res) {
           case ReadState::READ_DATA_RECEIVED:
@@ -673,6 +675,12 @@ void NetworkConnection::StateMachine(NetworkConnection *conn) {
             if (conn->protocol_handler_ == nullptr) {
               conn->TransitState(ConnState::CONN_PROCESS_INITIAL);
             } else {
+              if (aa_IsProfiling() == true) {
+                aa_InsertTimePoint((char *)"begin ConnState::CONN_READ, protocol_handler_ != nullptr");
+              } else {
+                aa_BeginProfiling();
+                aa_InsertTimePoint((char *)"begin ConnState::CONN_READ, protocol_handler_ != nullptr");
+              }
               conn->TransitState(ConnState::CONN_PROCESS);
             }
             break;
@@ -699,6 +707,8 @@ void NetworkConnection::StateMachine(NetworkConnection *conn) {
 
         conn->TransitState(ConnState::CONN_READ);
         done = true;
+        aa_InsertTimePoint((char *)"end ConnState::CONN_WAIT");
+        aa_EndProfiling();
         break;
       }
 

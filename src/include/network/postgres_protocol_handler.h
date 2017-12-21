@@ -33,6 +33,13 @@ namespace peloton {
 
 namespace network {
 
+/* aa_profiling begin */
+extern void aa_BeginProfiling();
+extern void aa_EndProfiling();
+extern bool aa_IsProfiling();
+extern void aa_InsertTimePoint(char* point_name);
+/* aa_profiling end */
+
 typedef std::vector<std::unique_ptr<OutputPacket>> ResponseBuffer;
 
 class PostgresProtocolHandler : public ProtocolHandler {
