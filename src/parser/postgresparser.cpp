@@ -33,6 +33,7 @@
 #include "type/types.h"
 #include "type/value.h"
 #include "type/value_factory.h"
+#include "network/postgres_protocol_handler.h"
 
 namespace peloton {
 namespace parser {
@@ -1453,8 +1454,11 @@ parser::UpdateStatement* PostgresParser::UpdateTransform(
 
 // Call postgres's parser and start transforming it into Peloton's parse tree
 parser::SQLStatementList* PostgresParser::ParseSQLString(const char* text) {
+  peloton::network::aa_InsertTimePoint((char *)"begin pg_query_parse_init");
   auto ctx = pg_query_parse_init();
+  peloton::network::aa_InsertTimePoint((char *)"before pg_query_parse");
   auto result = pg_query_parse(text);
+  peloton::network::aa_InsertTimePoint((char *)"after pg_query_parse");
   if (result.error) {
     // Parse Error
     std::string exception_msg = StringUtil::Format(
@@ -1466,6 +1470,7 @@ parser::SQLStatementList* PostgresParser::ParseSQLString(const char* text) {
 
   // DEBUG only. Comment this out in release mode
   // print_pg_parse_tree(result.tree);
+  peloton::network::aa_InsertTimePoint((char *)"begin ListTransform");
   parser::SQLStatementList* transform_result;
   try {
     transform_result = ListTransform(result.tree);
@@ -1477,6 +1482,7 @@ parser::SQLStatementList* PostgresParser::ParseSQLString(const char* text) {
 
   pg_query_parse_finish(ctx);
   pg_query_free_parse_result(result);
+  peloton::network::aa_InsertTimePoint((char *)"before return_transform_result");
   return transform_result;
 }
 
