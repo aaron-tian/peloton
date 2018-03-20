@@ -6,6 +6,7 @@
 #include "catalog/manager.h"
 #include "common/container_tuple.h"
 #include "storage/tile_group.h"
+#include "../include/logging/log_buffer.h"
 
 
 namespace peloton{
@@ -62,11 +63,11 @@ void LogBuffer::WriteRecord(LogRecord &record) {
       auto tg = manager.GetTileGroup(tuple_pos.block).get();
 
       // Write down the database id and the table id
-      output_buffer->WriteLong(tg->GetDatabaseId());
-      output_buffer->WriteLong(tg->GetTableId());
+      log_buffer_.WriteLong(tg->GetDatabaseId());
+      log_buffer_.WriteLong(tg->GetTableId());
 
-      output_buffer->WriteLong(tuple_pos.block);
-      output_buffer->WriteLong(tuple_pos.offset);
+      log_buffer_.WriteLong(tuple_pos.block);
+      log_buffer_.WriteLong(tuple_pos.offset);
 
       break;
     }
@@ -79,8 +80,8 @@ void LogBuffer::WriteRecord(LogRecord &record) {
       std::vector<catalog::Column> columns;
 
       // Write down the database id and the table id
-      output_buffer->WriteLong(tg->GetDatabaseId());
-      output_buffer->WriteLong(tg->GetTableId());
+      log_buffer_.WriteLong(tg->GetDatabaseId());
+      log_buffer_.WriteLong(tg->GetTableId());
 
       // Write the full tuple into the buffer
       for (auto schema : tg->GetTileSchemas()) {
@@ -93,17 +94,17 @@ void LogBuffer::WriteRecord(LogRecord &record) {
       for (oid_t oid = 0; oid < columns.size(); oid++) {
         auto val = container_tuple.GetValue(oid);
         //TODO(Anirudh): Check whether non inline attributes are handled or not
-        if (val != old_tuple.GetValue(oid)) {
-          output_buffer->WriteLong(oid);
-          val.SerializeTo(*(output_buffer));
+        if (val.CompareEquals(old_tuple.GetValue(oid)) == CmpBool::FALSE) {
+          log_buffer_.WriteLong(oid);
+          val.SerializeTo(log_buffer_);
         }
       }
 
-      output_buffer->WriteLong(old_tuple_pos.block);
-      output_buffer->WriteLong(old_tuple_pos.offset);
+      log_buffer_.WriteLong(old_tuple_pos.block);
+      log_buffer_.WriteLong(old_tuple_pos.offset);
 
-      output_buffer->WriteLong(tuple_pos.block);
-      output_buffer->WriteLong(tuple_pos.offset);
+      log_buffer_.WriteLong(tuple_pos.block);
+      log_buffer_.WriteLong(tuple_pos.offset);
       break;
     }
     default: {
