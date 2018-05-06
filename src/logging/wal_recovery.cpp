@@ -1,4 +1,5 @@
 
+#include <include/common/container_tuple.h>
 #include "index/index_factory.h"
 
 #include "catalog/index_catalog.h"
@@ -133,7 +134,7 @@ void WalRecovery::ParseFromDisk(ReplayStage stage){
             int copy_len = record_len + sizeof(record_len);
             int curr_offset = commited_txns_[txn_id].second;
 
-            LOG_INFO("txn %lu writing from %d to %d", txn_id, curr_offset, curr_offset+copy_len-1);
+//            LOG_INFO("txn %lu writing from %d to %d", txn_id, curr_offset, curr_offset+copy_len-1);
 
             PELOTON_MEMCPY(log_buffer_+curr_offset, buf+buf_curr, copy_len);
             commited_txns_[txn_id].second += copy_len;
@@ -435,6 +436,71 @@ void WalRecovery::ReplaySingleTxn(txn_id_t txn_id){
 
     else if(record_type==LogRecordType::TUPLE_UPDATE) {
       LOG_INFO("Replaying TUPLE_UPDATE");
+
+
+      oid_t database_id = (oid_t)record_decode.ReadLong();
+      oid_t table_id = (oid_t)record_decode.ReadLong();
+
+      oid_t old_tg_block = (oid_t)record_decode.ReadLong();
+      oid_t old_tg_offset = (oid_t)record_decode.ReadLong();
+      oid_t tg_block = (oid_t)record_decode.ReadLong();
+      oid_t tg_offset = (oid_t)record_decode.ReadLong();
+      oid_t num_values = (oid_t)record_decode.ReadLong();
+
+      ItemPointer new_location(tg_block, tg_offset);
+      ItemPointer old_location(old_tg_block, old_tg_offset);
+
+      auto table = storage::StorageManager::GetInstance()->GetTableWithOid(
+              database_id, table_id);
+
+      auto old_tg = table->GetTileGroupById(old_tg_block);
+      auto tg = table->GetTileGroupById(tg_block);
+
+      // the tile group might not have been created yet
+      if (tg.get() == nullptr) {
+        table->AddTileGroupWithOidForRecovery(tg_block);
+        tg = table->GetTileGroupById(tg_block);
+      }
+
+      auto schema = table->GetSchema();
+
+      ContainerTuple<storage::TileGroup> old_tuple(old_tg.get(), old_tg_offset);
+
+      std::unique_ptr<storage::Tuple> new_tuple(new storage::Tuple(schema, true));
+
+      std::map<oid_t, type::Value> update_diff;
+
+
+      for (unsigned i = 0; i < num_values; i++) {
+        oid_t col_idx =  (oid_t)record_decode.ReadLong();
+
+        type::Value val = type::Value::DeserializeFrom(
+                record_decode, schema->GetColumn(col_idx).GetType());
+
+        update_diff.insert(std::make_pair(col_idx, val));
+      }
+
+
+      for(oid_t oid= 0; oid < schema->GetColumns().size(); oid++){
+        if(update_diff.find(oid)==update_diff.end()){
+          new_tuple->SetValue(oid, old_tuple.GetValue(oid));
+        } else {
+          new_tuple->SetValue(oid, update_diff[oid]);
+        }
+      }
+
+      auto tuple_id =
+              tg->InsertTupleFromRecovery(commit_id, tg_offset, new_tuple.get(), old_location);
+
+      old_tg->UpdateTupleFromRecovery(commit_id, old_tg_offset, new_location);
+      table->IncreaseTupleCount(1);
+
+      if (tuple_id == tg->GetAllocatedTupleCount() - 1) {
+        if (table->GetTileGroupById(tg->GetTileGroupId() + 1).get() ==
+            nullptr)
+          table->AddTileGroupWithOidForRecovery(tg->GetTileGroupId() + 1);
+        catalog::Manager::GetInstance().GetNextTileGroupId();
+      }
     }
 
     else if(record_type==LogRecordType::TRANSACTION_BEGIN) {

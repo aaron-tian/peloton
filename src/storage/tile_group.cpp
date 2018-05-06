@@ -170,7 +170,7 @@ oid_t TileGroup::InsertTuple(const Tuple *tuple) {
  * Returns slot where inserted (INVALID_ID if not inserted)
  */
 oid_t TileGroup::InsertTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id,
-                                         const Tuple *tuple) {
+                                         const Tuple *tuple, ItemPointer old_location) {
   auto status = tile_group_header->GetEmptyTupleSlot(tuple_slot_id);
 
   // No more slots
@@ -214,10 +214,30 @@ oid_t TileGroup::InsertTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id,
   tile_group_header->SetTransactionId(tuple_slot_id, INITIAL_TXN_ID);
   tile_group_header->SetBeginCommitId(tuple_slot_id, commit_id);
   tile_group_header->SetEndCommitId(tuple_slot_id, MAX_CID);
-  tile_group_header->SetNextItemPointer(tuple_slot_id, INVALID_ITEMPOINTER);
+  tile_group_header->SetNextItemPointer(tuple_slot_id, old_location);
 
   tile_group_header->GetHeaderLock().Unlock();
 
+  return tuple_slot_id;
+}
+
+oid_t TileGroup::UpdateTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id,
+                                         ItemPointer new_location) {
+
+  tile_group_header->GetHeaderLock().Lock();
+
+  cid_t current_begin_cid = tile_group_header->GetBeginCommitId(tuple_slot_id);
+  if (current_begin_cid != MAX_CID && current_begin_cid > commit_id) {
+    tile_group_header->GetHeaderLock().Unlock();
+    return tuple_slot_id;
+  }
+
+  // Set MVCC info
+  tile_group_header->SetTransactionId(tuple_slot_id, INVALID_TXN_ID);
+  tile_group_header->SetBeginCommitId(tuple_slot_id, commit_id);
+  tile_group_header->SetEndCommitId(tuple_slot_id, commit_id);
+  tile_group_header->SetPrevItemPointer(tuple_slot_id, new_location);
+  tile_group_header->GetHeaderLock().Unlock();
   return tuple_slot_id;
 }
 
@@ -245,31 +265,7 @@ oid_t TileGroup::DeleteTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id) {
   return tuple_slot_id;
 }
 
-oid_t TileGroup::UpdateTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id,
-                                         ItemPointer new_location) {
-  auto status = tile_group_header->GetEmptyTupleSlot(tuple_slot_id);
 
-  tile_group_header->GetHeaderLock().Lock();
-
-  cid_t current_begin_cid = tile_group_header->GetBeginCommitId(tuple_slot_id);
-  if (current_begin_cid != MAX_CID && current_begin_cid > commit_id) {
-    tile_group_header->GetHeaderLock().Unlock();
-    return tuple_slot_id;
-  }
-
-  // No more slots
-  if (status == false) {
-    tile_group_header->GetHeaderLock().Unlock();
-    return INVALID_OID;
-  }
-  // Set MVCC info
-  tile_group_header->SetTransactionId(tuple_slot_id, INVALID_TXN_ID);
-  tile_group_header->SetBeginCommitId(tuple_slot_id, commit_id);
-  tile_group_header->SetEndCommitId(tuple_slot_id, commit_id);
-  tile_group_header->SetNextItemPointer(tuple_slot_id, new_location);
-  tile_group_header->GetHeaderLock().Unlock();
-  return tuple_slot_id;
-}
 
 /**
  * Grab specific slot and fill in the tuple

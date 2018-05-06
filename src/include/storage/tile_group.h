@@ -93,7 +93,8 @@ class TileGroup : public Printable {
   // insert tuple at specific tuple slot
   // used by recovery mode
   oid_t InsertTupleFromRecovery(cid_t commit_id, oid_t tuple_slot_id,
-                                const Tuple *tuple);
+                                const Tuple *tuple,
+                                ItemPointer old_location=INVALID_ITEMPOINTER);
 
   // insert tuple at specific tuple slot
   // used by recovery mode
