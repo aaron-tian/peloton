@@ -148,9 +148,11 @@ SETTING_bool(enable_logging,
 						 true,
 						 false, false)
 
+// Enable recovery. The default value is true for testing purposes
+// TODO(graghura): recovery should be turned off by default
 SETTING_bool(enable_recovery,
-             "Enable recovery for DB persistence (default: false)",
-             false,
+             "Enable recovery for DB persistence (default: true)",
+             true,
              false, false)
 
 //===----------------------------------------------------------------------===//
