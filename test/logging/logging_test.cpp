@@ -24,6 +24,7 @@
 #include <ctime>
 #include <sys/time.h>
 #include <unistd.h>
+#include <chrono>
 
 
 namespace peloton {
@@ -35,6 +36,7 @@ namespace test {
 
 class LoggingTests : public PelotonTest {};
 
+/*
 // aa_profiling {start}
 struct aa_TimePoint {
   struct timeval time_;
@@ -124,7 +126,7 @@ void aa_InsertTimePoint(char* point_name) {
   ++aa_time_point_count_;
 }
 // aa_profiling {end}
-
+*/
 void *LoggingTest(int port) {
   try {
     // forcing the factory to generate jdbc protocol handler
@@ -143,7 +145,8 @@ void *LoggingTest(int port) {
 
     EXPECT_NE(handler, nullptr);
 
-    aa_BeginProfiling();
+    // aa_BeginProfiling();
+    auto start = std::chrono::high_resolution_clock::now();
     // create table and insert some data
     txn1.exec("DROP TABLE IF EXISTS employee;");
     txn1.exec("CREATE TABLE employee(id INT, name VARCHAR(100));");
@@ -153,13 +156,16 @@ void *LoggingTest(int port) {
     txn2.exec("INSERT INTO employee VALUES (1, 'Aaron Tian');");
     txn2.exec("INSERT INTO employee VALUES (2, 'Gandeevan Raghuraman');");
     txn2.exec("INSERT INTO employee VALUES (3, 'Anirudh Kanjani');");
-    aa_InsertTimePoint((char *)"Insert Operations");
+    // aa_InsertTimePoint((char *)"Insert Operations");
     for (int i = 4; i < 100000; i ++) {
       txn2.exec("INSERT INTO employee VALUES (" + std::to_string(i) + ", 'Anirudh Kanjani');");
     }
-    aa_InsertTimePoint((char *)"Before txn2 commit");
+    // aa_InsertTimePoint((char *)"Before txn2 commit");
     txn2.commit();
-    aa_EndProfiling();
+    auto stop = std::chrono::high_resolution_clock::now();
+    // aa_EndProfiling();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    LOG_INFO("Time taken is %lu", duration.count());
 
   } catch (const std::exception &e) {
     LOG_INFO("[LoggingTest] Exception occurred: %s", e.what());
