@@ -13,7 +13,10 @@
 #include "concurrency/timestamp_ordering_transaction_manager.h"
 #include <cinttypes>
 #include "storage/storage_manager.h"
-
+#include "catalog/table_catalog.h"
+#include "catalog/schema_catalog.h"
+#include "catalog/system_catalogs.h"
+#include "catalog/catalog.h"
 #include "catalog/catalog_defaults.h"
 #include "catalog/manager.h"
 #include "common/exception.h"
@@ -21,7 +24,10 @@
 #include "common/platform.h"
 #include "concurrency/transaction_context.h"
 #include "gc/gc_manager_factory.h"
-#include "logging/log_manager_factory.h"
+#include "logging/log_record.h"
+#include "logging/log_buffer.h"
+#include "logging/wal_logger.h"
+#include "threadpool/logger_queue_pool.h"
 #include "settings/settings_manager.h"
 
 namespace peloton {
@@ -340,7 +346,7 @@ bool TimestampOrderingTransactionManager::PerformRead(TransactionContext *const 
 
 void TimestampOrderingTransactionManager::PerformInsert(
     TransactionContext *const current_txn, const ItemPointer &location,
-    ItemPointer *index_entry_ptr) {
+    ItemPointer *index_entry_ptr, char *values_buf, uint32_t values_size) {
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
   oid_t tile_group_id = location.block;
@@ -368,11 +374,38 @@ void TimestampOrderingTransactionManager::PerformInsert(
 
   // Write down the head pointer's address in tile group header
   tile_group_header->SetIndirection(tuple_id, index_entry_ptr);
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    if (values_buf != nullptr) {
+      auto tile_group = tile_group_header->GetTileGroup();
+      auto table_object = catalog::Catalog::GetInstance()->GetTableCatalogEntry(current_txn, tile_group->GetDatabaseId(), tile_group->GetTableId());
+      auto schema_oid = (catalog::Catalog::GetInstance()->GetSystemCatalogs(tile_group->GetDatabaseId())->GetSchemaCatalog()->GetSchemaCatalogEntry(current_txn, table_object->GetSchemaName()))->GetSchemaOid();
+      logging::LogRecord record =
+        logging::LogRecordFactory::CreateTupleRecord(
+          LogRecordType::TUPLE_INSERT, location, current_txn->GetEpochId(),
+          current_txn->GetTransactionId(), current_txn->GetCommitId(), schema_oid);
+      record.SetValuesArray(values_buf, values_size);
+
+      current_txn->GetLogBuffer()->WriteRecord(record);
+
+      if (current_txn->GetLogBuffer()->HasThresholdExceeded()) {
+
+        LOG_TRACE("Submitting log buffer %p", current_txn->GetLogBuffer());
+        /* insert to the queue */
+        threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+          current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+        /* allocate a new buffer for the current transaction */
+        current_txn->ResetLogBuffer();
+      }
+    }
+  }
 }
 
 void TimestampOrderingTransactionManager::PerformUpdate(
     TransactionContext *const current_txn, const ItemPointer &location,
-    const ItemPointer &new_location) {
+    const ItemPointer &new_location, char *values_buf, uint32_t values_size,
+    TargetList *offsets) {
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
   ItemPointer old_location = location;
@@ -384,9 +417,9 @@ void TimestampOrderingTransactionManager::PerformUpdate(
 
   auto storage_manager = storage::StorageManager::GetInstance();
   auto tile_group_header =
-      storage_manager->GetTileGroup(old_location.block)->GetHeader();
+    storage_manager->GetTileGroup(old_location.block)->GetHeader();
   auto new_tile_group_header =
-      storage_manager->GetTileGroup(new_location.block)->GetHeader();
+    storage_manager->GetTileGroup(new_location.block)->GetHeader();
 
   auto transaction_id = current_txn->GetTransactionId();
   // if we can perform update, then we must have already locked the older
@@ -394,8 +427,8 @@ void TimestampOrderingTransactionManager::PerformUpdate(
   PELOTON_ASSERT(tile_group_header->GetTransactionId(old_location.offset) ==
                  transaction_id);
   PELOTON_ASSERT(
-      tile_group_header->GetPrevItemPointer(old_location.offset).IsNull() ==
-      true);
+    tile_group_header->GetPrevItemPointer(old_location.offset).IsNull() ==
+    true);
 
   // check whether the new version is empty.
   PELOTON_ASSERT(new_tile_group_header->GetTransactionId(new_location.offset) ==
@@ -424,7 +457,7 @@ void TimestampOrderingTransactionManager::PerformUpdate(
   // we must be updating the latest version.
   // Set the header information for the new version
   ItemPointer *index_entry_ptr =
-      tile_group_header->GetIndirection(old_location.offset);
+    tile_group_header->GetIndirection(old_location.offset);
 
   // if there's no primary index on a table, then index_entry_ptr == nullptr.
   if (index_entry_ptr != nullptr) {
@@ -438,17 +471,47 @@ void TimestampOrderingTransactionManager::PerformUpdate(
     // because we are holding the write lock. This update should success in
     // its first trial.
     UNUSED_ATTRIBUTE auto res =
-        AtomicUpdateItemPointer(index_entry_ptr, new_location);
+      AtomicUpdateItemPointer(index_entry_ptr, new_location);
     PELOTON_ASSERT(res == true);
   }
 
   // Add the old tuple into the update set
   current_txn->RecordUpdate(old_location);
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    if (values_buf != nullptr) {
+      auto tile_group = tile_group_header->GetTileGroup();
+      auto table_object = catalog::Catalog::GetInstance()->GetTableCatalogEntry(current_txn, tile_group->GetDatabaseId(), tile_group->GetTableId());
+      auto schema_oid = (catalog::Catalog::GetInstance()->GetSystemCatalogs(tile_group->GetDatabaseId())->GetSchemaCatalog()->GetSchemaCatalogEntry(current_txn, table_object->GetSchemaName()))->GetSchemaOid();
+      logging::LogRecord record =
+        logging::LogRecordFactory::CreateTupleRecord(
+          LogRecordType::TUPLE_UPDATE, location, new_location, current_txn->GetEpochId(),
+          current_txn->GetTransactionId(), current_txn->GetCommitId(), schema_oid);
+
+      record.SetOldItemPointer(location);
+      record.SetValuesArray(values_buf, values_size);
+      record.SetOffsetsArray(offsets);
+
+      current_txn->GetLogBuffer()->WriteRecord(record);
+
+      if (current_txn->GetLogBuffer()->HasThresholdExceeded()) {
+
+
+        /* insert to the queue */
+        threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+          current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+        /* allocate a new buffer for the current transaction */
+        current_txn->ResetLogBuffer();
+      }
+    }
+  }
 }
 
 void TimestampOrderingTransactionManager::PerformUpdate(
-    TransactionContext *const current_txn UNUSED_ATTRIBUTE,
-    const ItemPointer &location) {
+  TransactionContext *const current_txn UNUSED_ATTRIBUTE,
+  const ItemPointer &location, char *values_buf, uint32_t values_size,
+  TargetList *offsets) {
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
   oid_t tile_group_id = location.block;
@@ -456,12 +519,41 @@ void TimestampOrderingTransactionManager::PerformUpdate(
 
   auto storage_manager = storage::StorageManager::GetInstance();
   UNUSED_ATTRIBUTE auto tile_group_header =
-      storage_manager->GetTileGroup(tile_group_id)->GetHeader();
+    storage_manager->GetTileGroup(tile_group_id)->GetHeader();
 
   PELOTON_ASSERT(tile_group_header->GetTransactionId(tuple_id) ==
                  current_txn->GetTransactionId());
   PELOTON_ASSERT(tile_group_header->GetBeginCommitId(tuple_id) == MAX_CID);
   PELOTON_ASSERT(tile_group_header->GetEndCommitId(tuple_id) == MAX_CID);
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    if (values_buf != nullptr) {
+      auto tile_group = tile_group_header->GetTileGroup();
+      auto table_object = catalog::Catalog::GetInstance()->GetTableCatalogEntry(current_txn, tile_group->GetDatabaseId(), tile_group->GetTableId());
+      auto schema_oid = (catalog::Catalog::GetInstance()->GetSystemCatalogs(tile_group->GetDatabaseId())->GetSchemaCatalog()->GetSchemaCatalogEntry(current_txn, table_object->GetSchemaName()))->GetSchemaOid();
+      logging::LogRecord record =
+        logging::LogRecordFactory::CreateTupleRecord(
+          LogRecordType::TUPLE_UPDATE, location, location,
+          current_txn->GetEpochId(), current_txn->GetTransactionId(),
+          current_txn->GetCommitId(), schema_oid);
+
+      record.SetOldItemPointer(location);
+      record.SetValuesArray(values_buf, values_size);
+      record.SetOffsetsArray(offsets);
+
+      current_txn->GetLogBuffer()->WriteRecord(record);
+
+      if (current_txn->GetLogBuffer()->HasThresholdExceeded()) {
+
+        /* insert to the queue */
+        threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+          current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+        /* allocate a new buffer for the current transaction */
+        current_txn->ResetLogBuffer();
+      }
+    }
+  }
 
   // no need to add the older version into the update set.
   // if there exists older version, then the older version must already
@@ -473,8 +565,8 @@ void TimestampOrderingTransactionManager::PerformUpdate(
 }
 
 void TimestampOrderingTransactionManager::PerformDelete(
-    TransactionContext *const current_txn, const ItemPointer &location,
-    const ItemPointer &new_location) {
+  TransactionContext *const current_txn, const ItemPointer &location,
+  const ItemPointer &new_location) {
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
   ItemPointer old_location = location;
@@ -487,14 +579,14 @@ void TimestampOrderingTransactionManager::PerformDelete(
   auto storage_manager = storage::StorageManager::GetInstance();
 
   auto tile_group_header =
-      storage_manager->GetTileGroup(old_location.block)->GetHeader();
+    storage_manager->GetTileGroup(old_location.block)->GetHeader();
   auto new_tile_group_header =
-      storage_manager->GetTileGroup(new_location.block)->GetHeader();
+    storage_manager->GetTileGroup(new_location.block)->GetHeader();
 
   auto transaction_id = current_txn->GetTransactionId();
 
   PELOTON_ASSERT(tile_group_header->GetLastReaderCommitId(
-                     old_location.offset) == current_txn->GetCommitId());
+    old_location.offset) == current_txn->GetCommitId());
 
   // if we can perform delete, then we must have already locked the older
   // version.
@@ -502,8 +594,8 @@ void TimestampOrderingTransactionManager::PerformDelete(
                  transaction_id);
   // we must be deleting the latest version.
   PELOTON_ASSERT(
-      tile_group_header->GetPrevItemPointer(old_location.offset).IsNull() ==
-      true);
+    tile_group_header->GetPrevItemPointer(old_location.offset).IsNull() ==
+    true);
 
   // check whether the new version is empty.
   PELOTON_ASSERT(new_tile_group_header->GetTransactionId(new_location.offset) ==
@@ -531,7 +623,7 @@ void TimestampOrderingTransactionManager::PerformDelete(
   // we must be deleting the latest version.
   // Set the header information for the new version
   ItemPointer *index_entry_ptr =
-      tile_group_header->GetIndirection(old_location.offset);
+    tile_group_header->GetIndirection(old_location.offset);
 
   // if there's no primary index on a table, then index_entry_ptr == nullptr.
   if (index_entry_ptr != nullptr) {
@@ -545,15 +637,42 @@ void TimestampOrderingTransactionManager::PerformDelete(
     // because we are holding the write lock. This update should success in
     // its first trial.
     UNUSED_ATTRIBUTE auto res =
-        AtomicUpdateItemPointer(index_entry_ptr, new_location);
+      AtomicUpdateItemPointer(index_entry_ptr, new_location);
     PELOTON_ASSERT(res == true);
   }
 
   current_txn->RecordDelete(old_location);
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+
+    auto tile_group = tile_group_header->GetTileGroup();
+    auto table_object = catalog::Catalog::GetInstance()->GetTableCatalogEntry(current_txn, tile_group->GetDatabaseId(), tile_group->GetTableId());
+    auto schema_oid = (catalog::Catalog::GetInstance()->GetSystemCatalogs(tile_group->GetDatabaseId())->GetSchemaCatalog()->GetSchemaCatalogEntry(current_txn, table_object->GetSchemaName()))->GetSchemaOid();
+    logging::LogRecord record =
+      logging::LogRecordFactory::CreateTupleRecord(
+        LogRecordType::TUPLE_DELETE, old_location, current_txn->GetEpochId(),
+        current_txn->GetTransactionId(), current_txn->GetCommitId(), schema_oid);
+
+    current_txn->GetLogBuffer()->WriteRecord(record);
+
+    if (current_txn->GetLogBuffer()->HasThresholdExceeded()) {
+
+      LOG_DEBUG("Submitting log buffer %p", current_txn->GetLogBuffer());
+
+      /* insert to the queue */
+      threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+        current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+      /* allocate a new buffer for the current transaction */
+      current_txn->ResetLogBuffer();
+    }
+
+  }
 }
 
+// called when the current transaction creates a new version and then deletes that version.
 void TimestampOrderingTransactionManager::PerformDelete(
-    TransactionContext *const current_txn, const ItemPointer &location) {
+  TransactionContext *const current_txn, const ItemPointer &location) {
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
   oid_t tile_group_id = location.block;
@@ -577,10 +696,36 @@ void TimestampOrderingTransactionManager::PerformDelete(
     // if this version is newly inserted.
     current_txn->RecordDelete(location);
   }
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    auto tile_group = tile_group_header->GetTileGroup();
+    auto table_object = catalog::Catalog::GetInstance()->GetTableCatalogEntry(current_txn, tile_group->GetDatabaseId(), tile_group->GetTableId());
+    auto schema_oid = (catalog::Catalog::GetInstance()->GetSystemCatalogs(tile_group->GetDatabaseId())->GetSchemaCatalog()->GetSchemaCatalogEntry(current_txn, table_object->GetSchemaName()))->GetSchemaOid();
+    logging::LogRecord record =
+      logging::LogRecordFactory::CreateTupleRecord(
+        LogRecordType::TUPLE_DELETE, location, current_txn->GetEpochId(),
+        current_txn->GetTransactionId(), current_txn->GetCommitId(), schema_oid);
+
+    current_txn->GetLogBuffer()->WriteRecord(record);
+
+    if (current_txn->GetLogBuffer()->HasThresholdExceeded()) {
+
+      LOG_DEBUG("Submitting log buffer %p", current_txn->GetLogBuffer());
+
+      /* insert to the queue */
+      threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+        current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+      /* allocate a new buffer for the current transaction */
+      current_txn->ResetLogBuffer();
+    }
+  }
 }
 
+
 ResultType TimestampOrderingTransactionManager::CommitTransaction(
-    TransactionContext *const current_txn) {
+    TransactionContext *const current_txn,
+    std::function<void(ResultType)> task_callback) {
   LOG_TRACE("Committing peloton txn : %" PRId64,
             current_txn->GetTransactionId());
 
@@ -597,9 +742,6 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
   //////////////////////////////////////////////////////////
 
   auto storage_manager = storage::StorageManager::GetInstance();
-  auto &log_manager = logging::LogManager::GetInstance();
-
-  log_manager.StartLogging();
 
   // generate transaction id.
   cid_t end_commit_id = current_txn->GetCommitId();
@@ -635,7 +777,7 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
 
     if (tile_group_id != last_tile_group_id) {
       tile_group_header =
-          storage_manager->GetTileGroup(tile_group_id)->GetHeader();
+        storage_manager->GetTileGroup(tile_group_id)->GetHeader();
       last_tile_group_id = tile_group_id;
     }
 
@@ -648,14 +790,14 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
       // we must guarantee that, at any time point, only one version is
       // visible.
       ItemPointer new_version =
-          tile_group_header->GetPrevItemPointer(tuple_slot);
+        tile_group_header->GetPrevItemPointer(tuple_slot);
 
       PELOTON_ASSERT(new_version.IsNull() == false);
 
       auto cid = tile_group_header->GetEndCommitId(tuple_slot);
       PELOTON_ASSERT(cid > end_commit_id);
       auto new_tile_group_header =
-          storage_manager->GetTileGroup(new_version.block)->GetHeader();
+        storage_manager->GetTileGroup(new_version.block)->GetHeader();
       new_tile_group_header->SetBeginCommitId(new_version.offset,
                                               end_commit_id);
       new_tile_group_header->SetEndCommitId(new_version.offset, cid);
@@ -674,18 +816,15 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
       // add old version into gc set.
       // may need to delete versions from secondary indexes.
       gc_set->operator[](tile_group_id)[tuple_slot] =
-          GCVersionType::COMMIT_UPDATE;
-
-      log_manager.LogUpdate(new_version);
-
+        GCVersionType::COMMIT_UPDATE;
     } else if (tuple_entry.second == RWType::DELETE) {
       ItemPointer new_version =
-          tile_group_header->GetPrevItemPointer(tuple_slot);
+        tile_group_header->GetPrevItemPointer(tuple_slot);
 
       auto cid = tile_group_header->GetEndCommitId(tuple_slot);
       PELOTON_ASSERT(cid > end_commit_id);
       auto new_tile_group_header =
-          storage_manager->GetTileGroup(new_version.block)->GetHeader();
+        storage_manager->GetTileGroup(new_version.block)->GetHeader();
       new_tile_group_header->SetBeginCommitId(new_version.offset,
                                               end_commit_id);
       new_tile_group_header->SetEndCommitId(new_version.offset, cid);
@@ -707,10 +846,7 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
       // recycle old version, delete from index
       // the gc should be responsible for recycling the newer empty version.
       gc_set->operator[](tile_group_id)[tuple_slot] =
-          GCVersionType::COMMIT_DELETE;
-
-      log_manager.LogDelete(ItemPointer(tile_group_id, tuple_slot));
-
+        GCVersionType::COMMIT_DELETE;
     } else if (tuple_entry.second == RWType::INSERT) {
       PELOTON_ASSERT(tile_group_header->GetTransactionId(tuple_slot) ==
                      current_txn->GetTransactionId());
@@ -724,9 +860,6 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
       tile_group_header->SetTransactionId(tuple_slot, INITIAL_TXN_ID);
 
       // nothing to be added to gc set.
-
-      log_manager.LogInsert(ItemPointer(tile_group_id, tuple_slot));
-
     } else if (tuple_entry.second == RWType::INS_DEL) {
       PELOTON_ASSERT(tile_group_header->GetTransactionId(tuple_slot) ==
                      current_txn->GetTransactionId());
@@ -742,7 +875,7 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
 
       // add to gc set.
       gc_set->operator[](tile_group_id)[tuple_slot] =
-          GCVersionType::COMMIT_INS_DEL;
+        GCVersionType::COMMIT_INS_DEL;
 
       // no log is needed for this case
     }
@@ -750,7 +883,31 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
 
   ResultType result = current_txn->GetResult();
 
-  log_manager.LogEnd();
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    // no need to log read-only transactions
+    if (!current_txn->IsReadOnly() && task_callback != nullptr) {
+
+      auto on_flush = [this, result, task_callback]() {
+        task_callback(result);
+      };
+
+      logging::LogRecord record =
+        logging::LogRecordFactory::CreateTupleRecord(
+          LogRecordType::TRANSACTION_COMMIT, current_txn->GetEpochId(),
+          current_txn->GetTransactionId(), current_txn->GetCommitId());
+
+      current_txn->GetLogBuffer()->WriteRecord(record);
+
+      current_txn->GetLogBuffer()->SetLoggerCallback(on_flush);
+
+      /* insert to the queue */
+      threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+        current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+      result = ResultType::QUEUING;
+
+    }
+  }
 
   EndTransaction(current_txn);
 
@@ -758,7 +915,8 @@ ResultType TimestampOrderingTransactionManager::CommitTransaction(
 }
 
 ResultType TimestampOrderingTransactionManager::AbortTransaction(
-    TransactionContext *const current_txn) {
+    TransactionContext *const current_txn, std::function<void(ResultType)> task_callback) {
+
   // a pre-declared read-only transaction will never abort.
   PELOTON_ASSERT(!current_txn->IsReadOnly());
 
@@ -927,9 +1085,36 @@ ResultType TimestampOrderingTransactionManager::AbortTransaction(
   }
 
   current_txn->SetResult(ResultType::ABORTED);
+
+  ResultType result = current_txn->GetResult();
+
+  if(logging::LogManager::GetInstance().IsLoggingEnabled()) {
+    // no need to log read-only transactions
+    if (!current_txn->IsReadOnly() && task_callback != nullptr) {
+      auto on_flush = [this, result, task_callback]() {
+          task_callback(result);
+      };
+
+      logging::LogRecord record =
+              logging::LogRecordFactory::CreateTupleRecord(
+                      LogRecordType::TRANSACTION_ABORT, current_txn->GetEpochId(),
+                      current_txn->GetTransactionId(), current_txn->GetCommitId());
+
+      current_txn->GetLogBuffer()->WriteRecord(record);
+
+      current_txn->GetLogBuffer()->SetLoggerCallback(on_flush);
+
+      /* insert to the queue */
+      threadpool::LoggerQueuePool::GetInstance().SubmitLogBuffer(
+              current_txn->GetLogToken(), current_txn->GetLogBuffer());
+
+      result = ResultType::QUEUING;
+    }
+  }
+
   EndTransaction(current_txn);
 
-  return ResultType::ABORTED;
+  return result;
 }
 
 }  // namespace concurrency

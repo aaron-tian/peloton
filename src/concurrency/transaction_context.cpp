@@ -18,6 +18,7 @@
 #include "common/macros.h"
 #include "common/platform.h"
 #include "trigger/trigger.h"
+#include "logging/log_buffer.h"
 
 #include <chrono>
 #include <iomanip>
@@ -81,9 +82,13 @@ void TransactionContext::Init(const size_t thread_id,
   isolation_level_ = isolation;
 
   gc_set_ = std::make_shared<GCSet>();
+
   gc_object_set_ = std::make_shared<GCObjectSet>();
 
   on_commit_triggers_.reset();
+
+  log_token_ =  threadpool::LoggerQueuePool::GetInstance().GetLogToken();
+  ResetLogBuffer();
 }
 
 RWType TransactionContext::GetRWType(const ItemPointer &location) {

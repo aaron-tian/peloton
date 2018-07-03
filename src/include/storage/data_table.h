@@ -202,7 +202,7 @@ class DataTable : public AbstractTable {
   // FOREIGN KEYS
   //===--------------------------------------------------------------------===//
 
-  bool CheckForeignKeySrcAndCascade(storage::Tuple *prev_tuple, 
+  bool CheckForeignKeySrcAndCascade(storage::Tuple *prev_tuple,
                                     storage::Tuple *new_tuple,
                                     concurrency::TransactionContext *transaction,
                                     executor::ExecutorContext *context,

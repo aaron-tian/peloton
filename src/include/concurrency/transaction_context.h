@@ -23,6 +23,8 @@
 #include "common/item_pointer.h"
 #include "common/printable.h"
 #include "common/internal_types.h"
+#include "logging/log_buffer.h"
+#include "threadpool/logger_queue_pool.h"
 
 namespace peloton {
 
@@ -110,6 +112,14 @@ class TransactionContext : public Printable {
    * @return     The timestamp.
    */
   inline uint64_t GetTimestamp() const { return timestamp_; }
+
+  inline int GetLogToken() const { return log_token_; }
+
+  inline logging::LogBuffer* GetLogBuffer() const { return log_buffer_; }
+
+  inline void ResetLogBuffer() {
+    log_buffer_ = new logging::LogBuffer(logging::LogManager::GetInstance().GetTransactionBufferSize());
+  }
 
   /**
    * @brief      Gets the query strings.
@@ -342,6 +352,10 @@ class TransactionContext : public Printable {
 
   /** one default transaction is NOT 'read only' unless it is marked 'read only' explicitly*/
   bool read_only_ = false;
+
+  int log_token_;
+
+  logging::LogBuffer *log_buffer_;
 };
 
 }  // namespace concurrency

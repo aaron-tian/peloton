@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "executor/executor_context.h"
 #include "codegen/compilation_context.h"
 #include "codegen/consumer_context.h"
 #include "common/item_pointer.h"
@@ -54,7 +55,7 @@ class Inserter {
   peloton::type::AbstractPool *GetPool();
 
   // Insert a tuple
-  void Insert();
+  void Insert(char *values_buf, uint32_t values_size);
 
   // Finalize the instance
   void TearDown();

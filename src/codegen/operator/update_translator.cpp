@@ -10,12 +10,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "codegen/buffering_consumer.h"
 #include "codegen/lang/if.h"
 #include "codegen/proxy/storage_manager_proxy.h"
 #include "codegen/proxy/target_proxy.h"
 #include "codegen/proxy/updater_proxy.h"
+#include "codegen/proxy/value_proxy.h"
+#include "codegen/proxy/values_runtime_proxy.h"
 #include "codegen/operator/update_translator.h"
 #include "codegen/table_storage.h"
+#include "codegen/type/sql_type.h"
 #include "planner/update_plan.h"
 #include "storage/data_table.h"
 
@@ -101,17 +105,44 @@ void UpdateTranslator::Consume(ConsumerContext &, RowBatch::Row &row) const {
 
   const auto &ais = plan.GetAttributeInfos();
 
+  auto is_primary_key = plan.GetUpdatePrimaryKey();
+  llvm::Value *diff = nullptr, *diff_size = nullptr;
+  if (is_primary_key) {
+    diff_size = codegen.Const32((int32_t)column_num);
+    diff = codegen.AllocateBuffer(
+        ValueProxy::GetType(codegen), column_num,
+        "diff");
+  } else {
+    diff_size = codegen.Const32((int32_t)target_list.size());
+    diff = codegen.AllocateBuffer(
+        ValueProxy::GetType(codegen), static_cast<uint32_t>(target_list.size()),
+        "diff");
+  }
+
+  diff =
+      codegen->CreatePointerCast(diff, codegen.CharPtrType());
   // Collect all the column values
   std::vector<codegen::Value> values;
-  for (uint32_t i = 0; i < column_num; i++) {
+  for (size_t i = 0, target_id = 0; i < column_num; i++) {
     codegen::Value val;
     uint32_t target_index = GetTargetIndex(target_list, i);
     if (target_index != INVALID_OID) {
       // Set the value for the update
       const auto &derived_attribute = target_list[target_index].second;
       val = row.DeriveValue(codegen, *derived_attribute.expr);
+      size_t offset = 0;
+      if (is_primary_key) {
+        offset = i;
+      } else {
+        offset = target_id;
+      }
+      peloton::codegen::BufferingConsumer::AddToTupleBuffer(val, codegen, diff, offset);
+      target_id++;
     } else {
       val = row.DeriveValue(codegen, ais[i]);
+      if (is_primary_key) {
+        peloton::codegen::BufferingConsumer::AddToTupleBuffer(val, codegen, diff, i);
+      }
     }
     values.push_back(val);
   }
@@ -139,7 +170,7 @@ void UpdateTranslator::Consume(ConsumerContext &, RowBatch::Row &row) const {
     table_storage_.StoreValues(codegen, tuple_ptr, values, pool_ptr);
 
     // Finally, update with help from the Updater
-    std::vector<llvm::Value *> update_args = {updater};
+    std::vector<llvm::Value *> update_args = {updater, diff, diff_size};
     if (!plan.GetUpdatePrimaryKey()) {
       codegen.Call(UpdaterProxy::Update, update_args);
     } else {
